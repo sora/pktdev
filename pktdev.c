@@ -24,6 +24,7 @@
 #include <linux/skbuff.h>
 #include <linux/init.h>
 
+#include <linux/workqueue.h>
 #include <linux/if_packet.h>
 
 #define VERSION    "0.0.0"
@@ -108,6 +109,11 @@ static struct semaphore pktdev_sem;
 static wait_queue_head_t write_q;
 static wait_queue_head_t read_q;
 
+/* workqueue */
+static struct workqueue_struct *pd_wq;
+struct work_struct work1;
+
+
 /* receive and transmitte buffer */
 struct _pbuf_dma {
 	unsigned char   *rx_start_ptr;		/* rx buf start */
@@ -124,7 +130,7 @@ struct net_device* device = NULL;
 
 /* Module parameters, defaults. */
 static int debug = 0;
-static char *interface = "eth0";
+static char *interface = "p2p1";
 
 
 static int pktdev_pack_rcv(struct sk_buff *skb, struct net_device *dev,
@@ -132,7 +138,7 @@ static int pktdev_pack_rcv(struct sk_buff *skb, struct net_device *dev,
 static int pktdev_open(struct inode *inode, struct file *filp);
 static ssize_t pktdev_read(struct file *filp, char __user *buf,
 				size_t count, loff_t *ppos);
-static int pktdev_direct_xmit(struct sk_buff *skb);
+static int packet_direct_xmit(struct sk_buff *skb);
 static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 				size_t count, loff_t *ppos);
 static int pktdev_release(struct inode *inode, struct file *filp);
@@ -248,8 +254,8 @@ static ssize_t pktdev_read(struct file *filp, char __user *buf,
 	return copy_len;
 }
 
-/* from af_packet.c: packet_direct_xmit() */
-static int pktdev_direct_xmit(struct sk_buff *skb)
+/* from af_packet.c */
+static int packet_direct_xmit(struct sk_buff *skb)
 {
 	struct net_device *dev = skb->dev;
 	const struct net_device_ops *ops = dev->netdev_ops;
@@ -375,80 +381,78 @@ static const unsigned char pkt[] = {
 };
 static const unsigned short pktlen = sizeof(pkt) / sizeof(pkt[0]);
 
-static int pktdev_tx_body(void)
+static void pktdev_tx_body(struct work_struct *work)
 {
-	int ret, copy_len = 0, i = 0;
+	int ret;
 	unsigned int frame_len = 0;
+	unsigned char *wr_ptr;
 	struct sk_buff *tx_skb = NULL;
 
 	if(debug)
 		pr_info("%s\n", __func__);
 
-txloop:
+	// save current write pointer
+	wr_ptr = pbuf0.tx_write_ptr;
 
 	// exit when ring buffer is empty
-	if (pbuf0.tx_read_ptr == pbuf0.tx_write_ptr)
-		goto txloop_exit;
+	while (pbuf0.tx_read_ptr != wr_ptr) {
 
-	// frame_len
-	frame_len = pktlen / 5;
+		// frame_len
+		frame_len = pktlen / 5;
 
-	// send process
-	tx_skb = netdev_alloc_skb(device, frame_len);
-	if (likely(tx_skb)) {
-		tx_skb->dev = device;
+		tx_skb = netdev_alloc_skb(device, frame_len);
+		if (likely(tx_skb)) {
+			tx_skb->dev = device;
 
-		skb_put(tx_skb, frame_len);
-		memcpy(tx_skb->data, pbuf0.tx_read_ptr, frame_len);
+			// fill packet
+			skb_put(tx_skb, frame_len);
+			memcpy(tx_skb->data, pbuf0.tx_read_ptr, frame_len);
 
-		ret = pktdev_direct_xmit(tx_skb);
-		if (ret) {
-			pr_info( "fail packet_direct_xmit=%d\n", ret );
-		} else {
-			// update read pointer of ring buffer
-			if ( (pbuf0.tx_read_ptr + frame_len) > pbuf0.tx_end_ptr ) {
+			// sending
+			ret = packet_direct_xmit(tx_skb);
+			if (ret) {
+				// no care when packet loss
+				pr_info( "fail packet_direct_xmit=%d\n", ret );
+			}
+
+			// update read pointer
+			if ((pbuf0.tx_read_ptr + frame_len) > pbuf0.tx_end_ptr) {
 				pbuf0.tx_read_ptr = pbuf0.tx_start_ptr +
-						(pktlen - (pbuf0.tx_end_ptr - pbuf0.tx_read_ptr));
+						(frame_len - (pbuf0.tx_end_ptr - pbuf0.tx_read_ptr));
 			} else {
 				pbuf0.tx_read_ptr += frame_len;
 			}
-			copy_len += frame_len;
+
 		}
 	}
-	if ((++i) == 10) {
-		pr_info( "inf txloop\n" );
-		goto txloop_exit;
-	}
-	goto txloop;
 
-txloop_exit:
-	return copy_len;
 }
 
 static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 			    size_t count, loff_t *ppos)
 {
-	int copy_len = 0;
+	int tmplen;
 
-//	if (debug)
+	if (debug)
 		func_enter();
 
-	if ((pbuf0.tx_write_ptr + pktlen) > pbuf0.tx_end_ptr) {
-		memcpy(pbuf0.tx_start_ptr, pbuf0.tx_read_ptr,
-				(pbuf0.tx_write_ptr - pbuf0.tx_read_ptr) );
+	if (count >= PKT_BUF_SZ)
+		return -ENOSPC;
 
-		pbuf0.tx_write_ptr = pbuf0.tx_start_ptr +
-				(pbuf0.tx_write_ptr - pbuf0.tx_read_ptr);
-		pbuf0.tx_read_ptr = pbuf0.tx_start_ptr;
+	if ((pbuf0.tx_write_ptr + pktlen) > pbuf0.tx_end_ptr) {
+		tmplen = pbuf0.tx_end_ptr - pbuf0.tx_write_ptr;
+		memcpy(pbuf0.tx_write_ptr, pkt, tmplen );
+		memcpy(pbuf0.tx_start_ptr, (pkt + tmplen), (pktlen - tmplen) );
+		pbuf0.tx_write_ptr = pbuf0.tx_start_ptr + (pktlen - tmplen);
+	} else {
+		memcpy(pbuf0.tx_write_ptr, pkt, pktlen);
+		pbuf0.tx_write_ptr += pktlen;
 	}
 
-	memcpy(pbuf0.tx_write_ptr, pkt, pktlen);
-	pbuf0.tx_write_ptr += pktlen;
-
 	// send process
-	copy_len = pktdev_tx_body();
+	queue_work(pd_wq, &work1);
 
-	return copy_len;
+	return count;
 }
 
 static int pktdev_release(struct inode *inode, struct file *filp)
@@ -535,6 +539,15 @@ static int __init pktdev_init(void)
 		goto error;
 	}
 
+	/* workqueue */
+	pd_wq = alloc_workqueue("pktdev", WQ_UNBOUND, 0);
+	if (!pd_wq) {
+		pr_err( "alloc_workqueue failed\n" );
+		ret = -ENOMEM;
+		goto out;
+	}
+	INIT_WORK( &work1, pktdev_tx_body );
+
 	/* Set receive buffer */
 	if ( ( pbuf0.rx_start_ptr = kmalloc(PKT_BUF_SZ, GFP_KERNEL) ) == 0 ) {
 		pr_info( "fail to kmalloc\n" );
@@ -583,7 +596,7 @@ error:
 		kfree( pbuf0.tx_start_ptr );
 		pbuf0.tx_start_ptr = NULL;
 	}
-
+out:
 	return ret;
 }
 
@@ -592,6 +605,13 @@ static void __exit pktdev_cleanup(void)
 	func_enter();
 
 	misc_deregister(&pktdev_dev);
+
+	/* workqueue */
+	if (pd_wq) {
+		flush_workqueue(pd_wq);
+		destroy_workqueue(pd_wq);
+		pd_wq = NULL;
+	}
 
 	dev_remove_pack(&pktdev_pack);
 
