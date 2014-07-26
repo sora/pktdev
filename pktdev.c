@@ -27,11 +27,15 @@
 #include <linux/workqueue.h>
 #include <linux/if_packet.h>
 
-#define VERSION    "0.0.0"
+#define VERSION  "0.0.0"
+#define DRV_NAME "pkt"
+
+#define PKTDEV_MAGIC      (0x3776)
+#define PKTDEV_BIN_HDR_SZ (4)
+
 #define MAX_PKT_SZ (9014)
 #define PKT_BUF_SZ (1024*1024*4)
-#define DRV_NAME   "pkt"
-#define DRV_IDX    (0)
+
 
 #define func_enter() pr_debug("entering %s\n", __func__);
 
@@ -120,11 +124,15 @@ struct _pbuf_dma {
 	unsigned char   *rx_end_ptr;		/* rx buf end */
 	unsigned char   *rx_write_ptr;		/* rx write ptr */
 	unsigned char   *rx_read_ptr;		/* rx read ptr */
-	unsigned char   *tx_start_ptr;		/* tx buf start */
-	unsigned char   *tx_end_ptr;		/* tx buf end */
-	unsigned char   *tx_write_ptr;		/* tx write ptr */
-	unsigned char   *tx_read_ptr;		/* tx read ptr */
-} static pbuf0={0,0,0,0,0,0,0,0};
+	unsigned char   *txb_start_ptr;		/* tx buf start */
+	unsigned char   *txb_end_ptr;		/* tx buf end */
+	unsigned char   *txb_write_ptr;		/* tx write ptr */
+	unsigned char   *txb_read_ptr;		/* tx read ptr */
+	unsigned char   *txa_start_ptr;		/* tx buf start */
+	unsigned char   *txa_end_ptr;		/* tx buf end */
+	unsigned char   *txa_write_ptr;		/* tx write ptr */
+	unsigned char   *txa_read_ptr;		/* tx read ptr */
+} static pbuf0={0,0,0,0,0,0,0,0,0,0,0,0};
 
 struct net_device* device = NULL;
 
@@ -153,8 +161,7 @@ static int pktdev_pack_rcv(struct sk_buff *skb, struct net_device *dev,
 	int i, frame_len;
 	unsigned char *p;
 
-	if (debug)
-		func_enter();
+	func_enter();
 
 	if (skb->pkt_type == PACKET_OUTGOING)	 // DROP loopback PACKET
 		goto lend;
@@ -216,8 +223,8 @@ lend:
 
 static int pktdev_open(struct inode *inode, struct file *filp)
 {
-	if (debug)
-		func_enter();
+
+	func_enter();
 
 //	rtnl_lock();
 //	dev_set_promiscuity(device, 1);
@@ -231,8 +238,7 @@ static ssize_t pktdev_read(struct file *filp, char __user *buf,
 {
 	int copy_len, available_read_len;
 
-	if (debug)
-		func_enter();
+	func_enter();
 
 	if ( wait_event_interruptible( read_q, ( pbuf0.rx_read_ptr != pbuf0.rx_write_ptr ) ) )
 		return -ERESTARTSYS;
@@ -324,6 +330,10 @@ static const unsigned char pkt[] = {
 };
 #endif
 static const unsigned char pkt[] = {
+	// magic code
+	0x37, 0x76,
+	// frame length
+	0x00, 0x3C,
 	// pktgen packet
 	0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
 	0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
@@ -335,6 +345,10 @@ static const unsigned char pkt[] = {
 	0x00, 0x00, 0x00, 0x06, 0x52, 0x55, 0x1d, 0x74,
 	0x00, 0x02, 0x43, 0xe2, 0x00, 0x00,
 
+	// magic code
+	0x37, 0x76,
+	// frame length
+	0x00, 0x3C,
 	// pktgen packet
 	0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
 	0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
@@ -346,6 +360,10 @@ static const unsigned char pkt[] = {
 	0x00, 0x00, 0x00, 0x06, 0x52, 0x55, 0x1d, 0x74,
 	0x00, 0x02, 0x43, 0xe2, 0x00, 0x00,
 
+	// magic code
+	0x37, 0x76,
+	// frame length
+	0x00, 0x3C,
 	// pktgen packet
 	0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
 	0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
@@ -357,6 +375,10 @@ static const unsigned char pkt[] = {
 	0x00, 0x00, 0x00, 0x06, 0x52, 0x55, 0x1d, 0x74,
 	0x00, 0x02, 0x43, 0xe2, 0x00, 0x00,
 
+	// magic code
+	0x37, 0x76,
+	// frame length
+	0x00, 0x3C,
 	// pktgen packet
 	0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
 	0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
@@ -368,6 +390,85 @@ static const unsigned char pkt[] = {
 	0x00, 0x00, 0x00, 0x06, 0x52, 0x55, 0x1d, 0x74,
 	0x00, 0x02, 0x43, 0xe2, 0x00, 0x00,
 
+	// magic code
+	0x37, 0x76,
+	// frame length
+	0x00, 0x3C,
+	// pktgen packet
+	0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
+	0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
+	0x08, 0x00,
+	0x45, 0x00, 0x00, 0x2e, 0x00, 0x05, 0x00, 0x00,
+	0x20, 0x11, 0x86, 0xb8, 0x0a, 0x00, 0x00, 0x01,
+	0x0a, 0x00, 0x00, 0x02, 0x00, 0x09, 0x00, 0x09,
+	0x00, 0x1a, 0x00, 0x00, 0xbe, 0x9b, 0xe9, 0x55,
+	0x00, 0x00, 0x00, 0x06, 0x52, 0x55, 0x1d, 0x74,
+	0x00, 0x02, 0x43, 0xe2, 0x00, 0x00,
+
+	// magic code
+	0x37, 0x76,
+	// frame length
+	0x00, 0x3C,
+	// pktgen packet
+	0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
+	0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
+	0x08, 0x00,
+	0x45, 0x00, 0x00, 0x2e, 0x00, 0x05, 0x00, 0x00,
+	0x20, 0x11, 0x86, 0xb8, 0x0a, 0x00, 0x00, 0x01,
+	0x0a, 0x00, 0x00, 0x02, 0x00, 0x09, 0x00, 0x09,
+	0x00, 0x1a, 0x00, 0x00, 0xbe, 0x9b, 0xe9, 0x55,
+	0x00, 0x00, 0x00, 0x06, 0x52, 0x55, 0x1d, 0x74,
+	0x00, 0x02, 0x43, 0xe2, 0x00, 0x00,
+
+	// magic code
+	0x37, 0x76,
+	// frame length
+	0x00, 0x3C,
+	// pktgen packet
+	0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
+	0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
+	0x08, 0x00,
+	0x45, 0x00, 0x00, 0x2e, 0x00, 0x05, 0x00, 0x00,
+	0x20, 0x11, 0x86, 0xb8, 0x0a, 0x00, 0x00, 0x01,
+	0x0a, 0x00, 0x00, 0x02, 0x00, 0x09, 0x00, 0x09,
+	0x00, 0x1a, 0x00, 0x00, 0xbe, 0x9b, 0xe9, 0x55,
+	0x00, 0x00, 0x00, 0x06, 0x52, 0x55, 0x1d, 0x74,
+	0x00, 0x02, 0x43, 0xe2, 0x00, 0x00,
+
+	// magic code
+	0x37, 0x76,
+	// frame length
+	0x00, 0x3C,
+	// pktgen packet
+	0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
+	0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
+	0x08, 0x00,
+	0x45, 0x00, 0x00, 0x2e, 0x00, 0x05, 0x00, 0x00,
+	0x20, 0x11, 0x86, 0xb8, 0x0a, 0x00, 0x00, 0x01,
+	0x0a, 0x00, 0x00, 0x02, 0x00, 0x09, 0x00, 0x09,
+	0x00, 0x1a, 0x00, 0x00, 0xbe, 0x9b, 0xe9, 0x55,
+	0x00, 0x00, 0x00, 0x06, 0x52, 0x55, 0x1d, 0x74,
+	0x00, 0x02, 0x43, 0xe2, 0x00, 0x00,
+
+	// magic code
+	0x37, 0x76,
+	// frame length
+	0x00, 0x3C,
+	// pktgen packet
+	0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
+	0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
+	0x08, 0x00,
+	0x45, 0x00, 0x00, 0x2e, 0x00, 0x05, 0x00, 0x00,
+	0x20, 0x11, 0x86, 0xb8, 0x0a, 0x00, 0x00, 0x01,
+	0x0a, 0x00, 0x00, 0x02, 0x00, 0x09, 0x00, 0x09,
+	0x00, 0x1a, 0x00, 0x00, 0xbe, 0x9b, 0xe9, 0x55,
+	0x00, 0x00, 0x00, 0x06, 0x52, 0x55, 0x1d, 0x74,
+	0x00, 0x02, 0x43, 0xe2, 0x00, 0x00,
+
+	// magic code
+	0x37, 0x76,
+	// frame length
+	0x00, 0x3C,
 	// pktgen packet
 	0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
 	0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
@@ -381,51 +482,85 @@ static const unsigned char pkt[] = {
 };
 static const unsigned short pktlen = sizeof(pkt) / sizeof(pkt[0]);
 
+/*
+ * pktdev_tx_body():
+ *
+ * Packet format (binary):
+ * 0                      16 (bit)
+ * +-----------------------+
+ * |  Magic code (0x3776)  |
+ * +-----------------------+
+ * |      Frame length     |
+ * +-----------------------+
+ * |                       |
+ * |      Packet data      |
+ * |                       |
+ * +-----------------------+
+ */
 static void pktdev_tx_body(struct work_struct *work)
 {
-	int ret;
-	unsigned int frame_len = 0;
+	int ret, tmplen;
 	unsigned char *wr_ptr;
 	struct sk_buff *tx_skb = NULL;
+	unsigned short magic, frame_len;
 
 	if(debug)
 		pr_info("%s\n", __func__);
 
 	// save current write pointer
-	wr_ptr = pbuf0.tx_write_ptr;
+	wr_ptr = pbuf0.txb_write_ptr;
 
 	// exit when ring buffer is empty
-	while (pbuf0.tx_read_ptr != wr_ptr) {
+	while (pbuf0.txb_read_ptr != wr_ptr) {
+
+		// magic code
+		magic = (pbuf0.txb_read_ptr[0] << 8) | pbuf0.txb_read_ptr[1];
+		if (magic != PKTDEV_MAGIC) {
+			pr_info( "data format error: magic code\n" );
+			return;
+		}
 
 		// frame_len
-		frame_len = pktlen / 5;
+		frame_len = (pbuf0.txb_read_ptr[2] << 8) | pbuf0.txb_read_ptr[3];
+		if (frame_len > MAX_PKT_SZ) {
+			pr_info( "data size error: MAX_PKT_SZ\n" );
+			return;
+		}
 
+		pbuf0.txb_read_ptr += PKTDEV_BIN_HDR_SZ;
+		if (pbuf0.txb_read_ptr > pbuf0.txb_end_ptr)
+			pbuf0.txb_read_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr + 1);
+
+		// alloc skb
 		tx_skb = netdev_alloc_skb(device, frame_len);
 		if (likely(tx_skb)) {
+
 			tx_skb->dev = device;
 
 			// fill packet
 			skb_put(tx_skb, frame_len);
-			memcpy(tx_skb->data, pbuf0.tx_read_ptr, frame_len);
+			if ((pbuf0.txb_read_ptr + frame_len) > pbuf0.txb_end_ptr) {
+				tmplen = pbuf0.txb_end_ptr - pbuf0.txb_read_ptr;
+				memcpy(tx_skb->data, pbuf0.txb_read_ptr, tmplen);
+				memcpy(tx_skb->data + tmplen, pbuf0.txb_start_ptr, (frame_len - tmplen));
+			} else {
+				memcpy(tx_skb->data, pbuf0.txb_read_ptr, frame_len);
+			}
 
 			// sending
 			ret = packet_direct_xmit(tx_skb);
 			if (ret) {
-				// no care when packet loss
-				pr_info( "fail packet_direct_xmit=%d\n", ret );
+				if (debug)
+					pr_info( "fail packet_direct_xmit=%d\n", ret );
 			}
 
 			// update read pointer
-			if ((pbuf0.tx_read_ptr + frame_len) > pbuf0.tx_end_ptr) {
-				pbuf0.tx_read_ptr = pbuf0.tx_start_ptr +
-						(frame_len - (pbuf0.tx_end_ptr - pbuf0.tx_read_ptr));
-			} else {
-				pbuf0.tx_read_ptr += frame_len;
-			}
+			pbuf0.txb_read_ptr += frame_len;
+			if (pbuf0.txb_read_ptr > pbuf0.txb_end_ptr)
+				pbuf0.txb_read_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr + 1);
 
 		}
 	}
-
 }
 
 static ssize_t pktdev_write(struct file *filp, const char __user *buf,
@@ -433,20 +568,28 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 {
 	int tmplen;
 
-	if (debug)
-		func_enter();
+	func_enter();
 
 	if (count >= PKT_BUF_SZ)
 		return -ENOSPC;
 
-	if ((pbuf0.tx_write_ptr + pktlen) > pbuf0.tx_end_ptr) {
-		tmplen = pbuf0.tx_end_ptr - pbuf0.tx_write_ptr;
-		memcpy(pbuf0.tx_write_ptr, pkt, tmplen );
-		memcpy(pbuf0.tx_start_ptr, (pkt + tmplen), (pktlen - tmplen) );
-		pbuf0.tx_write_ptr = pbuf0.tx_start_ptr + (pktlen - tmplen);
+#if 0
+	// userland to tmp buffer
+	if (copy_from_user(pbuf0.txa_write_ptr, buf, count)) {
+		pr_info( "copy_from_user failed.\n" );
+		return -EFAULT;
+	}
+	pbuf0.txa_write_ptr = pbuf0.txa_start_ptr + count;
+#endif
+
+	if ((pbuf0.txb_write_ptr + pktlen) > pbuf0.txb_end_ptr) {
+		tmplen = pbuf0.txb_end_ptr - pbuf0.txb_write_ptr;
+		memcpy(pbuf0.txb_write_ptr, pkt, tmplen );
+		memcpy(pbuf0.txb_start_ptr, (pkt + tmplen), (pktlen - tmplen) );
+		pbuf0.txb_write_ptr = pbuf0.txb_start_ptr + (pktlen - tmplen);
 	} else {
-		memcpy(pbuf0.tx_write_ptr, pkt, pktlen);
-		pbuf0.tx_write_ptr += pktlen;
+		memcpy(pbuf0.txb_write_ptr, pkt, pktlen);
+		pbuf0.txb_write_ptr += pktlen;
 	}
 
 	// send process
@@ -457,7 +600,7 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 
 static int pktdev_release(struct inode *inode, struct file *filp)
 {
-	if (debug)
+
 		func_enter();
 
 //	rtnl_lock();
@@ -559,14 +702,24 @@ static int __init pktdev_init(void)
 	pbuf0.rx_read_ptr  = pbuf0.rx_start_ptr;
 
 	/* Set transmitte buffer */
-	if ( ( pbuf0.tx_start_ptr = kmalloc(PKT_BUF_SZ, GFP_KERNEL) ) == 0 ) {
+	if ( ( pbuf0.txb_start_ptr = kmalloc(PKT_BUF_SZ, GFP_KERNEL) ) == 0 ) {
 		pr_info( "fail to kmalloc\n" );
 		ret = -1;
 		goto error;
 	}
-	pbuf0.tx_end_ptr = (pbuf0.tx_start_ptr + PKT_BUF_SZ - 1);
-	pbuf0.tx_write_ptr = pbuf0.tx_start_ptr;
-	pbuf0.tx_read_ptr  = pbuf0.tx_start_ptr;
+	pbuf0.txb_end_ptr = (pbuf0.txb_start_ptr + PKT_BUF_SZ - 1);
+	pbuf0.txb_write_ptr = pbuf0.txb_start_ptr;
+	pbuf0.txb_read_ptr  = pbuf0.txb_start_ptr;
+
+	/* Set transmitte buffer */
+	if ( ( pbuf0.txa_start_ptr = kmalloc(PKT_BUF_SZ, GFP_KERNEL) ) == 0 ) {
+		pr_info( "fail to kmalloc\n" );
+		ret = -1;
+		goto error;
+	}
+	pbuf0.txa_end_ptr = (pbuf0.txa_start_ptr + PKT_BUF_SZ - 1);
+	pbuf0.txa_write_ptr = pbuf0.txa_start_ptr;
+	pbuf0.txa_read_ptr  = pbuf0.txa_start_ptr;
 
 	/* register character device */
 	sprintf( name, "%s/%s", DRV_NAME, interface );
@@ -592,10 +745,16 @@ error:
 		pbuf0.rx_start_ptr = NULL;
 	}
 
-	if ( pbuf0.tx_start_ptr ) {
-		kfree( pbuf0.tx_start_ptr );
-		pbuf0.tx_start_ptr = NULL;
+	if ( pbuf0.txb_start_ptr ) {
+		kfree( pbuf0.txb_start_ptr );
+		pbuf0.txb_start_ptr = NULL;
 	}
+
+	if ( pbuf0.txa_start_ptr ) {
+		kfree( pbuf0.txa_start_ptr );
+		pbuf0.txa_start_ptr = NULL;
+	}
+
 out:
 	return ret;
 }
@@ -620,9 +779,14 @@ static void __exit pktdev_cleanup(void)
 		pbuf0.rx_start_ptr = NULL;
 	}
 
-	if ( pbuf0.tx_start_ptr ) {
-		kfree( pbuf0.tx_start_ptr );
-		pbuf0.tx_start_ptr = NULL;
+	if ( pbuf0.txb_start_ptr ) {
+		kfree( pbuf0.txb_start_ptr );
+		pbuf0.txb_start_ptr = NULL;
+	}
+
+	if ( pbuf0.txa_start_ptr ) {
+		kfree( pbuf0.txa_start_ptr );
+		pbuf0.txa_start_ptr = NULL;
 	}
 }
 
