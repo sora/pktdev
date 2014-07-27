@@ -135,6 +135,8 @@ struct _pbuf_dma {
 	unsigned char   *txa_read_ptr;		/* tx read ptr */
 } static pbuf0={0,0,0,0,0,0,0,0,0,0,0,0};
 
+static int txb_fragment_len = 0;
+
 struct net_device* device = NULL;
 
 /* Module parameters, defaults. */
@@ -325,7 +327,7 @@ drop:
 static void pktdev_tx_body(struct work_struct *work)
 {
 	int ret, tmplen;
-	unsigned char *wr_ptr;
+	unsigned char *wr_ptr, *rd_ptr;
 	struct sk_buff *tx_skb = NULL;
 	unsigned short magic, frame_len;
 
@@ -334,32 +336,33 @@ static void pktdev_tx_body(struct work_struct *work)
 
 	// save current write pointer
 	wr_ptr = pbuf0.txb_write_ptr;
+	rd_ptr = pbuf0.txb_read_ptr;
 
-	pr_info("[P] wr_ptr: %p, pbuf0.txb_write_ptr: %p, pbuf0.txb_read_ptr: %p\n",
-			wr_ptr, pbuf0.txb_write_ptr, pbuf0.txb_read_ptr);
+//	pr_info("[P] wr_ptr: %p, pbuf0.txb_write_ptr: %p, pbuf0.txb_read_ptr: %p\n",
+//			wr_ptr, pbuf0.txb_write_ptr, pbuf0.txb_read_ptr);
 
 	// exit when ring buffer is empty
-	while (pbuf0.txb_read_ptr != wr_ptr) {
+	while (rd_ptr != wr_ptr) {
 
 		// check magic code header
-		magic = (pbuf0.txb_read_ptr[0] << 8) | pbuf0.txb_read_ptr[1];
+		magic = (rd_ptr[0] << 8) | rd_ptr[1];
 		if (unlikely(magic != PKTDEV_MAGIC)) {
-			pr_info( "data format error: magic code: %X\n", (int)magic );
+			pr_info( "[wq] data format error: magic code: %X\n", (int)magic );
 			return;
 		}
 
 		// check frame_len header
-		frame_len = (pbuf0.txb_read_ptr[2] << 8) | pbuf0.txb_read_ptr[3];
+		frame_len = (rd_ptr[2] << 8) | rd_ptr[3];
 		if (unlikely( (frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ) )) {
-			pr_info("data size error: %X\n", (int)frame_len);
-			pr_info("[F] wr_ptr: %p, pbuf0.txb_write_ptr: %p, pbuf0.txb_read_ptr: %p\n",
-					wr_ptr, pbuf0.txb_write_ptr, pbuf0.txb_read_ptr);
+			pr_info("[wq] data size error: %X\n", (int)frame_len);
+//			pr_info("[F] wr_ptr: %p, pbuf0.txb_write_ptr: %p, pbuf0.txb_read_ptr: %p\n",
+//					wr_ptr, pbuf0.txb_write_ptr, pbuf0.txb_read_ptr);
 			return;
 		}
 
-		pbuf0.txb_read_ptr += PKTDEV_BIN_HDR_SZ;
-		if (pbuf0.txb_read_ptr > pbuf0.txb_end_ptr)
-			pbuf0.txb_read_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr);
+		rd_ptr += PKTDEV_BIN_HDR_SZ;
+		if (rd_ptr > pbuf0.txb_end_ptr)
+			rd_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr);
 
 		// alloc skb
 		tx_skb = netdev_alloc_skb(device, frame_len);
@@ -369,39 +372,56 @@ static void pktdev_tx_body(struct work_struct *work)
 
 			// fill packet
 			skb_put(tx_skb, frame_len);
-			if ((pbuf0.txb_read_ptr + frame_len) > pbuf0.txb_end_ptr) {
-				tmplen = pbuf0.txb_end_ptr - pbuf0.txb_read_ptr;
-				memcpy(tx_skb->data, pbuf0.txb_read_ptr, tmplen);
+			if ((rd_ptr + frame_len) > pbuf0.txb_end_ptr) {
+				tmplen = pbuf0.txb_end_ptr - rd_ptr;
+				memcpy(tx_skb->data, rd_ptr, tmplen);
 				memcpy(tx_skb->data + tmplen, pbuf0.txb_start_ptr, (frame_len - tmplen));
 			} else {
-				memcpy(tx_skb->data, pbuf0.txb_read_ptr, frame_len);
+				memcpy(tx_skb->data, rd_ptr, frame_len);
 			}
 
 			// sending
 			ret = packet_direct_xmit(tx_skb);
 			if (ret) {
-				if (debug)
-					pr_info( "fail packet_direct_xmit=%d\n", ret );
+				if (ret == 0x10) {    // TX_BUSY
+//					pr_info( "fail packet_direct_xmit=%d\n", ret );
+					queue_work(pd_wq, &work1);
+					return;
+				}
 			}
 
-			// update read pointer
-			pbuf0.txb_read_ptr += frame_len;
-			if (pbuf0.txb_read_ptr > pbuf0.txb_end_ptr)
-				pbuf0.txb_read_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr);
+			rd_ptr += frame_len;
+			if (rd_ptr > pbuf0.txb_end_ptr)
+				rd_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr);
 
+			pbuf0.txb_read_ptr = rd_ptr;
 		}
+
+		wake_up_interruptible(&write_q);
 	}
 }
 
 static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 			    size_t count, loff_t *ppos)
 {
-	int tmplen;
+	int tmplen, checked;
+	unsigned char *wr_ptr;
+	unsigned short magic, frame_len;
 
 	func_enter();
 
 	if (count >= PKT_BUF_SZ)
 		return -ENOSPC;
+
+
+	if (wait_event_interruptible(write_q, (((pbuf0.txb_read_ptr > pbuf0.txb_write_ptr) ? pbuf0.txb_read_ptr - pbuf0.txb_write_ptr : (pbuf0.txb_write_ptr - pbuf0.txb_read_ptr) + PKT_BUF_SZ) > (1024 * 256)))) {
+		pr_info("pbuf0.txb_write_ptr: %p, pbuf0.txb_read_ptr: %p\n",
+				pbuf0.txb_write_ptr, pbuf0.txb_read_ptr);
+		return -ERESTARTSYS;
+	}
+
+	// txb_fragment_len
+	pbuf0.txb_write_ptr += txb_fragment_len;
 
 	if ((pbuf0.txb_write_ptr + count) > pbuf0.txb_end_ptr) {
 		tmplen = pbuf0.txb_end_ptr - pbuf0.txb_write_ptr;
@@ -413,14 +433,52 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 			pr_info( "copy_from_user failed.\n" );
 			return -EFAULT;
 		}
-		pbuf0.txb_write_ptr = pbuf0.txb_start_ptr + (count - tmplen);
+//		pbuf0.txb_write_ptr = pbuf0.txb_start_ptr + (count - tmplen);
 	} else {
 		if (copy_from_user(pbuf0.txb_write_ptr, buf, count)) {
 			pr_info( "copy_from_user failed.\n" );
 			return -EFAULT;
 		}
-		pbuf0.txb_write_ptr += count;
+//		pbuf0.txb_write_ptr += count;
 	}
+
+	// save current write pointer
+	wr_ptr = pbuf0.txb_write_ptr;
+
+	checked = 0;
+
+check_data:
+
+	// check magic code header
+	magic = (wr_ptr[0] << 8) | wr_ptr[1];
+	if (unlikely(magic != PKTDEV_MAGIC)) {
+		pr_info( "[wr] data format error: magic code: %X\n", (int)magic );
+		return -EFAULT;
+	}
+
+	// check frame_len header
+	frame_len = (wr_ptr[2] << 8) | wr_ptr[3];
+	if (unlikely( (frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ) )) {
+		pr_info("[wr] data size error: %X\n", (int)frame_len);
+		return -EFAULT;
+	}
+
+	checked += PKTDEV_BIN_HDR_SZ + frame_len;
+	if (checked <= count) {
+		wr_ptr += PKTDEV_BIN_HDR_SZ + frame_len;
+		if (wr_ptr > pbuf0.txb_end_ptr)
+			wr_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr);
+	}
+	if (checked >= count) {
+		txb_fragment_len = checked - count;
+		goto end;
+	}
+
+	goto check_data;
+
+end:
+	// update write pointer
+	pbuf0.txb_write_ptr = wr_ptr;
 
 	// send process
 	queue_work(pd_wq, &work1);
@@ -505,7 +563,8 @@ static int __init pktdev_init(void)
 	}
 
 	/* workqueue */
-	pd_wq = alloc_workqueue("pktdev", WQ_UNBOUND, 0);
+//	pd_wq = alloc_workqueue("pktdev", WQ_UNBOUND, 0);
+	pd_wq = create_singlethread_workqueue("pktdev");
 	if (!pd_wq) {
 		pr_err( "alloc_workqueue failed\n" );
 		ret = -ENOMEM;
