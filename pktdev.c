@@ -338,29 +338,38 @@ static void pktdev_tx_body(struct work_struct *work)
 	wr_ptr = pbuf0.txb_write_ptr;
 	rd_ptr = pbuf0.txb_read_ptr;
 
-//	pr_info("[P] wr_ptr: %p, pbuf0.txb_write_ptr: %p, pbuf0.txb_read_ptr: %p\n",
-//			wr_ptr, pbuf0.txb_write_ptr, pbuf0.txb_read_ptr);
-
 	// exit when ring buffer is empty
 	while (rd_ptr != wr_ptr) {
 
 		// check magic code header
-		magic = (rd_ptr[0] << 8) | rd_ptr[1];
+		if ((rd_ptr + 1) > pbuf0.txb_end_ptr)
+			magic = (rd_ptr[0] << 8) | pbuf0.txb_start_ptr[0];
+		else
+			magic = (rd_ptr[0] << 8) | rd_ptr[1];
 		if (unlikely(magic != PKTDEV_MAGIC)) {
-			pr_info( "[wq] data format error: magic code: %X\n", (int)magic );
+			pr_info("[wq] data format error: magic code: %X\n", (int)magic );
 			return;
+//			pr_info("[wq] wr_ptr: %p, rd_ptr: %p, pbuf0.txb_write_ptr: %p, pbuf0.txb_read_ptr: %p\n",
+//					wr_ptr, rd_ptr, pbuf0.txb_write_ptr, pbuf0.txb_read_ptr);
+//			while (((rd_ptr[0] << 8) | rd_ptr[1]) != PKTDEV_MAGIC)
+//				rd_ptr += 1;
 		}
+
+		rd_ptr += 2;
+		if (rd_ptr > pbuf0.txb_end_ptr)
+			rd_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr);
 
 		// check frame_len header
-		frame_len = (rd_ptr[2] << 8) | rd_ptr[3];
+		if ((rd_ptr + 1) > pbuf0.txb_end_ptr)
+			frame_len = (rd_ptr[0] << 8) | pbuf0.txb_start_ptr[0];
+		else
+			frame_len = (rd_ptr[0] << 8) | rd_ptr[1];
 		if (unlikely( (frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ) )) {
 			pr_info("[wq] data size error: %X\n", (int)frame_len);
-//			pr_info("[F] wr_ptr: %p, pbuf0.txb_write_ptr: %p, pbuf0.txb_read_ptr: %p\n",
-//					wr_ptr, pbuf0.txb_write_ptr, pbuf0.txb_read_ptr);
 			return;
 		}
 
-		rd_ptr += PKTDEV_BIN_HDR_SZ;
+		rd_ptr += 2;
 		if (rd_ptr > pbuf0.txb_end_ptr)
 			rd_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr);
 
@@ -433,13 +442,11 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 			pr_info( "copy_from_user failed.\n" );
 			return -EFAULT;
 		}
-//		pbuf0.txb_write_ptr = pbuf0.txb_start_ptr + (count - tmplen);
 	} else {
 		if (copy_from_user(pbuf0.txb_write_ptr, buf, count)) {
 			pr_info( "copy_from_user failed.\n" );
 			return -EFAULT;
 		}
-//		pbuf0.txb_write_ptr += count;
 	}
 
 	// save current write pointer
@@ -450,25 +457,41 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 check_data:
 
 	// check magic code header
-	magic = (wr_ptr[0] << 8) | wr_ptr[1];
+	if ((wr_ptr + 1) > pbuf0.txb_end_ptr)
+		magic = (wr_ptr[0] << 8) | pbuf0.txb_start_ptr[0];
+	else
+		magic = (wr_ptr[0] << 8) | wr_ptr[1];
 	if (unlikely(magic != PKTDEV_MAGIC)) {
-		pr_info( "[wr] data format error: magic code: %X\n", (int)magic );
+		pr_info("[wr] data format error: magic code: %X\n", (int)magic);
 		return -EFAULT;
+//		pr_info("[wr] wr_ptr: %p, pbuf0.txb_write_ptr: %p, pbuf0.txb_read_ptr: %p\n",
+//				wr_ptr, pbuf0.txb_write_ptr, pbuf0.txb_read_ptr);
+//		while (((wr_ptr[0] << 8) | wr_ptr[1]) != PKTDEV_MAGIC)
+//			wr_ptr += 1;
 	}
 
+	wr_ptr += 2;
+	if (wr_ptr > pbuf0.txb_end_ptr)
+		wr_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr);
+
 	// check frame_len header
-	frame_len = (wr_ptr[2] << 8) | wr_ptr[3];
+	if ((wr_ptr + 1) > pbuf0.txb_end_ptr)
+		frame_len = (wr_ptr[0] << 8) | pbuf0.txb_start_ptr[0];
+	else
+		frame_len = (wr_ptr[0] << 8) | wr_ptr[1];
 	if (unlikely( (frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ) )) {
 		pr_info("[wr] data size error: %X\n", (int)frame_len);
 		return -EFAULT;
 	}
 
 	checked += PKTDEV_BIN_HDR_SZ + frame_len;
+
 	if (checked <= count) {
-		wr_ptr += PKTDEV_BIN_HDR_SZ + frame_len;
+		wr_ptr += 2 + frame_len;
 		if (wr_ptr > pbuf0.txb_end_ptr)
 			wr_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr);
 	}
+
 	if (checked >= count) {
 		txb_fragment_len = checked - count;
 		goto end;
