@@ -125,18 +125,17 @@ struct _pbuf_dma {
 	unsigned char   *rx_end_ptr;		/* rx buf end */
 	unsigned char   *rx_write_ptr;		/* rx write ptr */
 	unsigned char   *rx_read_ptr;		/* rx read ptr */
-	unsigned char   *txb_start_ptr;		/* tx buf start */
-	unsigned char   *txb_end_ptr;		/* tx buf end */
-	unsigned char   *txb_write_ptr;		/* tx write ptr */
-	unsigned char   *txb_read_ptr;		/* tx read ptr */
-	unsigned char   *txa_start_ptr;		/* tx buf start */
-	unsigned char   *txa_end_ptr;		/* tx buf end */
-	unsigned char   *txa_write_ptr;		/* tx write ptr */
-	unsigned char   *txa_read_ptr;		/* tx read ptr */
+	unsigned char   *txbuf_start;		/* tx buf start */
+	unsigned char   *txbuf_end;		/* tx buf end */
+	unsigned char   *txbuf_wr;		/* tx write ptr */
+	unsigned char   *txbuf_rd;		/* tx read ptr */
+	unsigned char   *txring_start;		/* tx buf start */
+	unsigned char   *txring_end;		/* tx buf end */
+	unsigned char   *txring_wr;		/* tx write ptr */
+	unsigned char   *txring_rd;		/* tx read ptr */
 } static pbuf0={0,0,0,0,0,0,0,0,0,0,0,0};
 
-static int txb_fragment_len = 0;
-
+static int txring_free;
 struct net_device* device = NULL;
 
 /* Module parameters, defaults. */
@@ -327,7 +326,7 @@ drop:
 static void pktdev_tx_body(struct work_struct *work)
 {
 	int ret, tmplen;
-	unsigned char *wr_ptr, *rd_ptr;
+	unsigned char *rd_ptr;
 	struct sk_buff *tx_skb = NULL;
 	unsigned short magic, frame_len;
 
@@ -335,174 +334,173 @@ static void pktdev_tx_body(struct work_struct *work)
 		pr_info("%s\n", __func__);
 
 	// save current write pointer
-	wr_ptr = pbuf0.txb_write_ptr;
-	rd_ptr = pbuf0.txb_read_ptr;
+	rd_ptr = pbuf0.txring_rd;
 
-	// exit when ring buffer is empty
-	while (rd_ptr != wr_ptr) {
+tx_loop:
 
-		// check magic code header
-		if ((rd_ptr + 1) > pbuf0.txb_end_ptr)
-			magic = (rd_ptr[0] << 8) | pbuf0.txb_start_ptr[0];
-		else
-			magic = (rd_ptr[0] << 8) | rd_ptr[1];
-		if (unlikely(magic != PKTDEV_MAGIC)) {
-			pr_info("[wq] data format error: magic code: %X\n", (int)magic );
-			return;
-//			pr_info("[wq] wr_ptr: %p, rd_ptr: %p, pbuf0.txb_write_ptr: %p, pbuf0.txb_read_ptr: %p\n",
-//					wr_ptr, rd_ptr, pbuf0.txb_write_ptr, pbuf0.txb_read_ptr);
-//			while (((rd_ptr[0] << 8) | rd_ptr[1]) != PKTDEV_MAGIC)
-//				rd_ptr += 1;
-		}
+	// alignment
+	rd_ptr = (unsigned char *)((uintptr_t)(rd_ptr + 3) & 0xfffffffffffffffc);
 
-		rd_ptr += 2;
-		if (rd_ptr > pbuf0.txb_end_ptr)
-			rd_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr);
+	if (rd_ptr == pbuf0.txring_wr)
+		goto tx_end;
 
-		// check frame_len header
-		if ((rd_ptr + 1) > pbuf0.txb_end_ptr)
-			frame_len = (rd_ptr[0] << 8) | pbuf0.txb_start_ptr[0];
-		else
-			frame_len = (rd_ptr[0] << 8) | rd_ptr[1];
-		if (unlikely( (frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ) )) {
-			pr_info("[wq] data size error: %X\n", (int)frame_len);
-			return;
-		}
-
-		rd_ptr += 2;
-		if (rd_ptr > pbuf0.txb_end_ptr)
-			rd_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr);
-
-		// alloc skb
-		tx_skb = netdev_alloc_skb(device, frame_len);
-		if (likely(tx_skb)) {
-
-			tx_skb->dev = device;
-
-			// fill packet
-			skb_put(tx_skb, frame_len);
-			if ((rd_ptr + frame_len) > pbuf0.txb_end_ptr) {
-				tmplen = pbuf0.txb_end_ptr - rd_ptr;
-				memcpy(tx_skb->data, rd_ptr, tmplen);
-				memcpy(tx_skb->data + tmplen, pbuf0.txb_start_ptr, (frame_len - tmplen));
-			} else {
-				memcpy(tx_skb->data, rd_ptr, frame_len);
-			}
-
-			// sending
-			ret = packet_direct_xmit(tx_skb);
-			if (ret) {
-				if (ret == 0x10) {    // TX_BUSY
-//					pr_info( "fail packet_direct_xmit=%d\n", ret );
-					queue_work(pd_wq, &work1);
-					return;
-				}
-			}
-
-			rd_ptr += frame_len;
-			if (rd_ptr > pbuf0.txb_end_ptr)
-				rd_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr);
-
-			pbuf0.txb_read_ptr = rd_ptr;
-		}
-
-		wake_up_interruptible(&write_q);
+	// check magic code header
+	magic = (rd_ptr[0] << 8) | rd_ptr[1];
+	if (unlikely(magic != PKTDEV_MAGIC)) {
+		pr_info("[wq] data format error: magic code: %X\n", (int)magic );
+		return;
 	}
+
+	// check frame_len header
+	frame_len = (rd_ptr[2] << 8) | rd_ptr[3];
+	if (unlikely( (frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ) )) {
+		pr_info("[wq] data size error: %X\n", (int)frame_len);
+		return;
+	}
+
+	rd_ptr += 4;
+	if (rd_ptr > pbuf0.txring_end)
+		rd_ptr -= (pbuf0.txring_end - pbuf0.txring_start);
+
+	// alloc skb
+	tx_skb = netdev_alloc_skb(device, frame_len);
+	if (likely(tx_skb)) {
+		tx_skb->dev = device;
+
+		// fill packet
+		skb_put(tx_skb, frame_len);
+		if ((rd_ptr + frame_len) > pbuf0.txring_end) {
+			tmplen = pbuf0.txring_end - rd_ptr;
+			memcpy(tx_skb->data, rd_ptr, tmplen);
+			memcpy(tx_skb->data + tmplen, pbuf0.txring_start, (frame_len - tmplen));
+		} else {
+			memcpy(tx_skb->data, rd_ptr, frame_len);
+		}
+
+		// sending
+		ret = packet_direct_xmit(tx_skb);
+		if (ret) {
+			if (ret == 0x10) {    // TX_BUSY
+				pr_info( "fail packet_direct_xmit=%d\n", ret );
+				queue_work(pd_wq, &work1);
+				return;
+			}
+		}
+
+		rd_ptr += frame_len;
+		if (rd_ptr > pbuf0.txring_end)
+			rd_ptr -= (pbuf0.txring_end - pbuf0.txring_start);
+	}
+
+	if (rd_ptr > pbuf0.txring_wr)
+		txring_free = rd_ptr - pbuf0.txring_wr;
+	else
+		txring_free = PKT_BUF_SZ + (pbuf0.txring_wr - rd_ptr);
+
+	wake_up_interruptible( &write_q );
+
+	goto tx_loop;
+
+tx_end:
+	pbuf0.txring_rd = rd_ptr;
+
+	wake_up_interruptible( &write_q );
+
+	return;
 }
 
 static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 			    size_t count, loff_t *ppos)
 {
-	int tmplen, checked;
-	unsigned char *wr_ptr;
+	int has_fragment_data = 0;
+	unsigned int len, tmplen, fragment_len;
 	unsigned short magic, frame_len;
+	static unsigned char fragment[MAX_PKT_SZ];
+	unsigned char *tmp_txring_wr;
 
 	func_enter();
 
-	if (count >= PKT_BUF_SZ)
+	if ((count >= PKT_BUF_SZ) || (count < MIN_PKT_SZ))
 		return -ENOSPC;
 
+	pbuf0.txbuf_wr = pbuf0.txbuf_start;
+	pbuf0.txbuf_rd = pbuf0.txbuf_start;
 
-	if (wait_event_interruptible(write_q, (((pbuf0.txb_read_ptr > pbuf0.txb_write_ptr) ? pbuf0.txb_read_ptr - pbuf0.txb_write_ptr : (pbuf0.txb_write_ptr - pbuf0.txb_read_ptr) + PKT_BUF_SZ) > (1024 * 256)))) {
-		pr_info("pbuf0.txb_write_ptr: %p, pbuf0.txb_read_ptr: %p\n",
-				pbuf0.txb_write_ptr, pbuf0.txb_read_ptr);
-		return -ERESTARTSYS;
+	// fragment data
+	if (has_fragment_data) {
+		memcpy(pbuf0.txbuf_start, fragment, fragment_len);
+		pbuf0.txbuf_wr += fragment_len;
+		has_fragment_data = 0;
 	}
 
-	// txb_fragment_len
-	pbuf0.txb_write_ptr += txb_fragment_len;
-
-	if ((pbuf0.txb_write_ptr + count) > pbuf0.txb_end_ptr) {
-		tmplen = pbuf0.txb_end_ptr - pbuf0.txb_write_ptr;
-		if (copy_from_user(pbuf0.txb_write_ptr, buf, tmplen)) {
-			pr_info( "copy_from_user failed.\n" );
-			return -EFAULT;
-		}
-		if (copy_from_user(pbuf0.txb_start_ptr, (buf + tmplen), (count - tmplen))) {
-			pr_info( "copy_from_user failed.\n" );
-			return -EFAULT;
-		}
-	} else {
-		if (copy_from_user(pbuf0.txb_write_ptr, buf, count)) {
-			pr_info( "copy_from_user failed.\n" );
-			return -EFAULT;
-		}
+	if (copy_from_user(pbuf0.txbuf_wr, buf, count)) {
+		pr_info( "copy_from_user failed.\n" );
+		return -EFAULT;
 	}
 
-	// save current write pointer
-	wr_ptr = pbuf0.txb_write_ptr;
+copy_to_ring:
 
-	checked = 0;
-
-check_data:
+	pr_info("copy_to_ring\n");
 
 	// check magic code header
-	if ((wr_ptr + 1) > pbuf0.txb_end_ptr)
-		magic = (wr_ptr[0] << 8) | pbuf0.txb_start_ptr[0];
-	else
-		magic = (wr_ptr[0] << 8) | wr_ptr[1];
-	if (unlikely(magic != PKTDEV_MAGIC)) {
+	magic = (pbuf0.txbuf_rd[0] << 8) | pbuf0.txbuf_rd[1];
+	if (magic != PKTDEV_MAGIC) {
 		pr_info("[wr] data format error: magic code: %X\n", (int)magic);
 		return -EFAULT;
-//		pr_info("[wr] wr_ptr: %p, pbuf0.txb_write_ptr: %p, pbuf0.txb_read_ptr: %p\n",
-//				wr_ptr, pbuf0.txb_write_ptr, pbuf0.txb_read_ptr);
-//		while (((wr_ptr[0] << 8) | wr_ptr[1]) != PKTDEV_MAGIC)
-//			wr_ptr += 1;
 	}
 
-	wr_ptr += 2;
-	if (wr_ptr > pbuf0.txb_end_ptr)
-		wr_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr);
-
 	// check frame_len header
-	if ((wr_ptr + 1) > pbuf0.txb_end_ptr)
-		frame_len = (wr_ptr[0] << 8) | pbuf0.txb_start_ptr[0];
-	else
-		frame_len = (wr_ptr[0] << 8) | wr_ptr[1];
-	if (unlikely( (frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ) )) {
+	frame_len = (pbuf0.txbuf_rd[2] << 8) | pbuf0.txbuf_rd[3];
+	if ((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ)) {
 		pr_info("[wr] data size error: %X\n", (int)frame_len);
 		return -EFAULT;
 	}
 
-	checked += PKTDEV_BIN_HDR_SZ + frame_len;
+	len = PKTDEV_BIN_HDR_SZ + frame_len;
 
-	if (checked <= count) {
-		wr_ptr += 2 + frame_len;
-		if (wr_ptr > pbuf0.txb_end_ptr)
-			wr_ptr -= (pbuf0.txb_end_ptr - pbuf0.txb_start_ptr);
+	// copy fragment data to tmp buf
+	fragment_len = count - (pbuf0.txbuf_rd - pbuf0.txbuf_start);
+	if (len > fragment_len) {
+		has_fragment_data = 1;
+		memcpy(fragment, pbuf0.txbuf_rd, fragment_len);
+		goto copy_end;
 	}
 
-	if (checked >= count) {
-		txb_fragment_len = checked - count;
-		goto end;
+	// blocking
+	if (pbuf0.txring_rd > pbuf0.txring_wr)
+		txring_free = pbuf0.txring_rd - pbuf0.txring_wr;
+ 	else
+		txring_free = PKT_BUF_SZ + (pbuf0.txring_wr - pbuf0.txring_rd);
+
+	if (wait_event_interruptible(write_q, (txring_free < (PKT_BUF_SZ << 3)))) {
+		pr_info("block: max: %d, txring_free %d, txring_rd: %p, txring_wr: %p\n",
+				(int)PKT_BUF_SZ, txring_free, pbuf0.txring_rd, pbuf0.txring_wr);
+		return -ERESTARTSYS;
 	}
 
-	goto check_data;
+	// txbuf to txring
+	tmp_txring_wr = pbuf0.txring_wr;
+	if ((tmp_txring_wr + len) > pbuf0.txring_end) {
+		tmplen = pbuf0.txring_end - tmp_txring_wr;
+		memcpy(tmp_txring_wr, pbuf0.txbuf_rd, tmplen);
+		memcpy(pbuf0.txring_start, (pbuf0.txbuf_rd + tmplen), (len - tmplen));
+		tmp_txring_wr = pbuf0.txring_start + (len - tmplen);
+	} else {
+		memcpy(tmp_txring_wr, pbuf0.txbuf_rd, len);
+	 	tmp_txring_wr+= len;
+	}
+	pbuf0.txbuf_rd += len;
 
-end:
-	// update write pointer
-	pbuf0.txb_write_ptr = wr_ptr;
+	// fix memory alignment
+	pbuf0.txring_wr =
+		(unsigned char *)((uintptr_t)(tmp_txring_wr + 3) & 0xfffffffffffffffc);
 
+	if (count == (pbuf0.txbuf_rd - pbuf0.txbuf_start))
+		goto copy_end;
+
+	goto copy_to_ring;
+
+copy_end:
 	// send process
 	queue_work(pd_wq, &work1);
 
@@ -606,24 +604,24 @@ static int __init pktdev_init(void)
 	pbuf0.rx_read_ptr  = pbuf0.rx_start_ptr;
 
 	/* Set transmitte buffer */
-	if ( ( pbuf0.txb_start_ptr = kmalloc(PKT_BUF_SZ, GFP_KERNEL) ) == 0 ) {
+	if ( ( pbuf0.txbuf_start = kmalloc(PKT_BUF_SZ, GFP_KERNEL) ) == 0 ) {
 		pr_info( "fail to kmalloc\n" );
 		ret = -1;
 		goto error;
 	}
-	pbuf0.txb_end_ptr = (pbuf0.txb_start_ptr + PKT_BUF_SZ - 1);
-	pbuf0.txb_write_ptr = pbuf0.txb_start_ptr;
-	pbuf0.txb_read_ptr  = pbuf0.txb_start_ptr;
+	pbuf0.txbuf_end = (pbuf0.txbuf_start + PKT_BUF_SZ - 1);
+	pbuf0.txbuf_wr  = pbuf0.txbuf_start;
+	pbuf0.txbuf_rd  = pbuf0.txbuf_start;
 
 	/* Set transmitte buffer */
-	if ( ( pbuf0.txa_start_ptr = kmalloc(PKT_BUF_SZ, GFP_KERNEL) ) == 0 ) {
+	if ( ( pbuf0.txring_start = kmalloc(PKT_BUF_SZ, GFP_KERNEL) ) == 0 ) {
 		pr_info( "fail to kmalloc\n" );
 		ret = -1;
 		goto error;
 	}
-	pbuf0.txa_end_ptr = (pbuf0.txa_start_ptr + PKT_BUF_SZ - 1);
-	pbuf0.txa_write_ptr = pbuf0.txa_start_ptr;
-	pbuf0.txa_read_ptr  = pbuf0.txa_start_ptr;
+	pbuf0.txring_end = (pbuf0.txring_start + PKT_BUF_SZ - 1);
+	pbuf0.txring_wr  = pbuf0.txring_start;
+	pbuf0.txring_rd  = pbuf0.txring_start;
 
 	/* register character device */
 	sprintf( name, "%s/%s", DRV_NAME, interface );
@@ -649,14 +647,14 @@ error:
 		pbuf0.rx_start_ptr = NULL;
 	}
 
-	if ( pbuf0.txb_start_ptr ) {
-		kfree( pbuf0.txb_start_ptr );
-		pbuf0.txb_start_ptr = NULL;
+	if ( pbuf0.txbuf_start ) {
+		kfree( pbuf0.txbuf_start );
+		pbuf0.txbuf_start = NULL;
 	}
 
-	if ( pbuf0.txa_start_ptr ) {
-		kfree( pbuf0.txa_start_ptr );
-		pbuf0.txa_start_ptr = NULL;
+	if ( pbuf0.txring_start ) {
+		kfree( pbuf0.txring_start );
+		pbuf0.txring_start = NULL;
 	}
 
 out:
@@ -683,14 +681,14 @@ static void __exit pktdev_cleanup(void)
 		pbuf0.rx_start_ptr = NULL;
 	}
 
-	if ( pbuf0.txb_start_ptr ) {
-		kfree( pbuf0.txb_start_ptr );
-		pbuf0.txb_start_ptr = NULL;
+	if ( pbuf0.txbuf_start ) {
+		kfree( pbuf0.txbuf_start );
+		pbuf0.txbuf_start = NULL;
 	}
 
-	if ( pbuf0.txa_start_ptr ) {
-		kfree( pbuf0.txa_start_ptr );
-		pbuf0.txa_start_ptr = NULL;
+	if ( pbuf0.txring_start ) {
+		kfree( pbuf0.txring_start );
+		pbuf0.txring_start = NULL;
 	}
 }
 
