@@ -342,30 +342,34 @@ static void pktdev_tx_body(struct work_struct *work)
 	int ret, tmplen;
 	struct sk_buff *tx_skb = NULL;
 	unsigned short magic, frame_len;
-	unsigned char *tmp_txring_rd;
+	unsigned char *txring_wr_snapshot, *tmp_txring_rd;
 
 	func_enter();
+
+	txring_wr_snapshot = pbuf0.txring_wr;
 
 tx_loop:
 
 //	debug_wq();
 
-	tmp_txring_rd = pbuf0.txring_rd;
-
-	if (tmp_txring_rd == pbuf0.txring_wr)
+	if (pbuf0.txring_rd == txring_wr_snapshot)
 		goto tx_end;
+
+	tmp_txring_rd = pbuf0.txring_rd;
 
 	// check magic code header
 	magic = (tmp_txring_rd[0] << 8) | tmp_txring_rd[1];
 	if (unlikely(magic != PKTDEV_MAGIC)) {
-		pr_info("[wq] data format error: magic code: %X\n", (int)magic );
+		pr_info("[wq] format error: magic code %X, rd %p, wr %p\n",
+		(int)magic, tmp_txring_rd, pbuf0.txring_wr );
 		goto err;
 	}
 
 	// check frame_len header
 	frame_len = (tmp_txring_rd[2] << 8) | tmp_txring_rd[3];
 	if (unlikely( (frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ) )) {
-		pr_info("[wq] data size error: %X %X\n", (int)frame_len, (int)magic);
+		pr_info("[wq] data size error: %X, rd %p, wr %p\n",
+		(int)frame_len, tmp_txring_rd, pbuf0.txring_wr);
 		goto err;
 	}
 
