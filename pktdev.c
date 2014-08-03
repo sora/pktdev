@@ -158,6 +158,7 @@ static int pktdev_release(struct inode *inode, struct file *filp);
 static unsigned int pktdev_poll( struct file* filp, poll_table* wait );
 static long pktdev_ioctl(struct file *filp,
 				unsigned int cmd, unsigned long arg);
+static int pktdev_update_txring_free(void);
 
 
 static int pktdev_pack_rcv(struct sk_buff *skb, struct net_device *dev,
@@ -234,6 +235,16 @@ static int pktdev_open(struct inode *inode, struct file *filp)
 //	rtnl_lock();
 //	dev_set_promiscuity(device, 1);
 //	rtnl_unlock();
+
+	return 0;
+}
+
+static int pktdev_update_txring_free(void)
+{
+	if (pbuf0.txring_rd > pbuf0.txring_wr)
+		txring_free = pbuf0.txring_rd - pbuf0.txring_wr;
+	else
+		txring_free = PKT_BUF_SZ - (pbuf0.txring_wr - pbuf0.txring_rd);
 
 	return 0;
 }
@@ -329,44 +340,38 @@ drop:
 static void pktdev_tx_body(struct work_struct *work)
 {
 	int ret, tmplen;
-	//unsigned char *rd_ptr;
 	struct sk_buff *tx_skb = NULL;
 	unsigned short magic, frame_len;
+	unsigned char *tmp_txring_rd;
 
-	if(debug)
-		pr_info("%s\n", __func__);
-
-	// save current write pointer
-	//d_ptr = pbuf0.txring_rd;
+	func_enter();
 
 tx_loop:
 
-	//debug_wq();
+//	debug_wq();
 
-	// alignment
-	pbuf0.txring_rd =
-		(unsigned char *)((uintptr_t)(pbuf0.txring_rd + 3) & 0xfffffffffffffffc);
+	tmp_txring_rd = pbuf0.txring_rd;
 
-	if (pbuf0.txring_rd == pbuf0.txring_wr)
+	if (tmp_txring_rd == pbuf0.txring_wr)
 		goto tx_end;
 
 	// check magic code header
-	magic = (pbuf0.txring_rd[0] << 8) | pbuf0.txring_rd[1];
+	magic = (tmp_txring_rd[0] << 8) | tmp_txring_rd[1];
 	if (unlikely(magic != PKTDEV_MAGIC)) {
 		pr_info("[wq] data format error: magic code: %X\n", (int)magic );
 		goto err;
 	}
 
 	// check frame_len header
-	frame_len = (pbuf0.txring_rd[2] << 8) | pbuf0.txring_rd[3];
+	frame_len = (tmp_txring_rd[2] << 8) | tmp_txring_rd[3];
 	if (unlikely( (frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ) )) {
-		pr_info("[wq] data size error: %X\n", (int)frame_len);
+		pr_info("[wq] data size error: %X %X\n", (int)frame_len, (int)magic);
 		goto err;
 	}
 
-	pbuf0.txring_rd += 4;
-	if (pbuf0.txring_rd > pbuf0.txring_end)
-		pbuf0.txring_rd -= (pbuf0.txring_end - pbuf0.txring_start);
+	tmp_txring_rd += 4;
+	if (tmp_txring_rd > pbuf0.txring_end)
+		tmp_txring_rd -= (pbuf0.txring_end - pbuf0.txring_start);
 
 	// alloc skb
 	tx_skb = netdev_alloc_skb(device, frame_len);
@@ -375,12 +380,12 @@ tx_loop:
 
 		// fill packet
 		skb_put(tx_skb, frame_len);
-		if ((pbuf0.txring_rd + frame_len) > pbuf0.txring_end) {
-			tmplen = pbuf0.txring_end - pbuf0.txring_rd;
-			memcpy(tx_skb->data, pbuf0.txring_rd, tmplen);
+		if ((tmp_txring_rd + frame_len) > pbuf0.txring_end) {
+			tmplen = pbuf0.txring_end - tmp_txring_rd;
+			memcpy(tx_skb->data, tmp_txring_rd, tmplen);
 			memcpy(tx_skb->data + tmplen, pbuf0.txring_start, (frame_len - tmplen));
 		} else {
-			memcpy(tx_skb->data, pbuf0.txring_rd, frame_len);
+			memcpy(tx_skb->data, tmp_txring_rd, frame_len);
 		}
 
 		// sending
@@ -388,29 +393,24 @@ tx_loop:
 		if (ret) {
 			if (ret == 0x10) {    // TX_BUSY
 				//pr_info( "fail packet_direct_xmit=%d\n", ret );
-				pbuf0.txring_rd -= 4;
 				goto tx_fail;
 			}
 		}
 
-		pbuf0.txring_rd += frame_len;
-		if (pbuf0.txring_rd > pbuf0.txring_end)
-			pbuf0.txring_rd -= (pbuf0.txring_end - pbuf0.txring_start);
+		tmp_txring_rd += frame_len;
+		if (tmp_txring_rd > pbuf0.txring_end)
+		 	tmp_txring_rd -= (pbuf0.txring_end - pbuf0.txring_start);
+		pbuf0.txring_rd =
+			(unsigned char *)((uintptr_t)(tmp_txring_rd + 3) & 0xfffffffffffffffc);
+		pktdev_update_txring_free();
 	}
 
 tx_fail:
-
-	if (pbuf0.txring_rd > pbuf0.txring_wr)
-		txring_free = pbuf0.txring_rd - pbuf0.txring_wr;
-	else
-		txring_free = PKT_BUF_SZ - (pbuf0.txring_wr - pbuf0.txring_rd);
-
-	wake_up_interruptible( &write_q );
+	wake_up_interruptible(&write_q);
 
 	goto tx_loop;
 
 tx_end:
-
 err:
 	--txq_len;
 	return;
@@ -444,7 +444,7 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 
 	// fragment data
 	if (has_fragment_data) {
-		memcpy(pbuf0.txbuf_start, fragment, fragment_len);
+		memcpy(pbuf0.txbuf_wr, fragment, fragment_len);
 		pbuf0.txbuf_wr += fragment_len;
 		has_fragment_data = 0;
 	}
@@ -455,8 +455,6 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 	}
 
 copy_to_ring:
-
-	//pr_info("copy_to_ring\n");
 
 	// check magic code header
 	magic = (pbuf0.txbuf_rd[0] << 8) | pbuf0.txbuf_rd[1];
@@ -498,6 +496,7 @@ copy_to_ring:
 	// update ring write pointer with memory alignment
 	pbuf0.txring_wr =
 		(unsigned char *)((uintptr_t)(tmp_txring_wr + 3) & 0xfffffffffffffffc);
+	pktdev_update_txring_free();
 
 	if (count == (pbuf0.txbuf_rd - pbuf0.txbuf_start))
 		goto copy_end;
@@ -509,10 +508,7 @@ copy_end:
 	if (++txq_len < 30)
 		queue_work(pd_wq, &work1);
 
-	if (pbuf0.txring_rd > pbuf0.txring_wr)
-		txring_free = pbuf0.txring_rd - pbuf0.txring_wr;
-	else
-		txring_free = PKT_BUF_SZ - (pbuf0.txring_wr - pbuf0.txring_rd);
+	//debug_wq();
 
 	return count;
 }
