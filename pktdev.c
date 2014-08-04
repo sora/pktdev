@@ -359,7 +359,7 @@ tx_loop:
 
 	// check magic code header
 	magic = (tmp_txring_rd[0] << 8) | tmp_txring_rd[1];
-	if (unlikely(magic != PKTDEV_MAGIC)) {
+	if (magic != PKTDEV_MAGIC) {
 		pr_info("[wq] format error: magic code %X, rd %p, wr %p\n",
 		(int)magic, tmp_txring_rd, pbuf0.txring_wr );
 		goto err;
@@ -367,9 +367,11 @@ tx_loop:
 
 	// check frame_len header
 	frame_len = (tmp_txring_rd[2] << 8) | tmp_txring_rd[3];
-	if (unlikely( (frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ) )) {
-		pr_info("[wq] data size error: %X, rd %p, wr %p\n",
-		(int)frame_len, tmp_txring_rd, pbuf0.txring_wr);
+	if ((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ)) {
+		pr_info("[wq] data size error: %X, rd %p, wr %p, st[0] %d, st[1] %d, st[2] %d, st[3] %d\n",
+		(int)frame_len, tmp_txring_rd, pbuf0.txring_wr,
+		(int)pbuf0.txring_start[0], (int)pbuf0.txring_start[1],
+		(int)pbuf0.txring_start[2], (int)pbuf0.txring_start[3] );
 		goto err;
 	}
 
@@ -405,7 +407,7 @@ tx_loop:
 		if (tmp_txring_rd > pbuf0.txring_end)
 		 	tmp_txring_rd -= (pbuf0.txring_end - pbuf0.txring_start);
 		pbuf0.txring_rd =
-			(unsigned char *)((uintptr_t)(tmp_txring_rd + 3) & 0xfffffffffffffffc);
+			(unsigned char *)((uintptr_t)tmp_txring_rd & 0xfffffffffffffffc);
 		pktdev_update_txring_free();
 	}
 
@@ -435,11 +437,12 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 		return -ENOSPC;
 
 	// blocking
-	queue_work(pd_wq, &work1);
+	//queue_work(pd_wq, &work1);
 
 	if (wait_event_interruptible(write_q, (txring_free > 524288))) {
-		pr_info("block: max: %d, txring_free %d, txring_rd: %p, txring_wr: %p\n",
-				(int)PKT_BUF_SZ, txring_free, pbuf0.txring_rd, pbuf0.txring_wr);
+		pr_info("block: max: %d, start: %p, end: %p, txring_free %d, txring_rd: %p, txring_wr: %p\n",
+				(int)PKT_BUF_SZ, pbuf0.txring_start, pbuf0.txring_end, txring_free,
+				pbuf0.txring_rd, pbuf0.txring_wr);
 		return -ERESTARTSYS;
 	}
 
@@ -499,7 +502,7 @@ copy_to_ring:
 
 	// update ring write pointer with memory alignment
 	pbuf0.txring_wr =
-		(unsigned char *)((uintptr_t)(tmp_txring_wr + 3) & 0xfffffffffffffffc);
+		(unsigned char *)((uintptr_t)tmp_txring_wr & 0xfffffffffffffffc);
 	pktdev_update_txring_free();
 
 	if (count == (pbuf0.txbuf_rd - pbuf0.txbuf_start))
