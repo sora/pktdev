@@ -350,8 +350,6 @@ static void pktdev_tx_body(struct work_struct *work)
 
 tx_loop:
 
-//	debug_wq();
-
 	if (pbuf0.txring_rd == txring_wr_snapshot)
 		goto tx_end;
 
@@ -359,7 +357,7 @@ tx_loop:
 
 	// check magic code header
 	magic = (tmp_txring_rd[0] << 8) | tmp_txring_rd[1];
-	if (magic != PKTDEV_MAGIC) {
+	if (unlikely(magic != PKTDEV_MAGIC)) {
 		pr_info("[wq] format error: magic code %X, rd %p, wr %p\n",
 		(int)magic, tmp_txring_rd, pbuf0.txring_wr );
 		goto err;
@@ -367,11 +365,9 @@ tx_loop:
 
 	// check frame_len header
 	frame_len = (tmp_txring_rd[2] << 8) | tmp_txring_rd[3];
-	if ((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ)) {
-		pr_info("[wq] data size error: %X, rd %p, wr %p, st[0] %d, st[1] %d, st[2] %d, st[3] %d\n",
-		(int)frame_len, tmp_txring_rd, pbuf0.txring_wr,
-		(int)pbuf0.txring_start[0], (int)pbuf0.txring_start[1],
-		(int)pbuf0.txring_start[2], (int)pbuf0.txring_start[3] );
+	if (unlikely((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ))) {
+		pr_info("[wq] data size error: %X, rd %p, wr %p\n",
+			(int)frame_len, tmp_txring_rd, pbuf0.txring_wr);
 		goto err;
 	}
 
@@ -436,8 +432,7 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 	if ((count >= PKT_BUF_SZ) || (count < MIN_PKT_SZ))
 		return -ENOSPC;
 
-	// blocking
-	//queue_work(pd_wq, &work1);
+	queue_work(pd_wq, &work1);
 
 	if (wait_event_interruptible(write_q, (txring_free > 524288))) {
 		pr_info("block: max: %d, start: %p, end: %p, txring_free %d, txring_rd: %p, txring_wr: %p\n",
@@ -465,14 +460,14 @@ copy_to_ring:
 
 	// check magic code header
 	magic = (pbuf0.txbuf_rd[0] << 8) | pbuf0.txbuf_rd[1];
-	if (magic != PKTDEV_MAGIC) {
+	if (unlikely(magic != PKTDEV_MAGIC)) {
 		pr_info("[wr] data format error: magic code: %X\n", (int)magic);
 		return -EFAULT;
 	}
 
 	// check frame_len header
 	frame_len = (pbuf0.txbuf_rd[2] << 8) | pbuf0.txbuf_rd[3];
-	if ((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ)) {
+	if (unlikely((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ))) {
 		pr_info("[wr] data size error: %X\n", (int)frame_len);
 		return -EFAULT;
 	}
@@ -511,11 +506,10 @@ copy_to_ring:
 	goto copy_to_ring;
 
 copy_end:
+
 	// send process
 	if (++txq_len < 30)
 		queue_work(pd_wq, &work1);
-
-	//debug_wq();
 
 	return count;
 }
