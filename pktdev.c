@@ -175,42 +175,43 @@ static int pktdev_pack_rcv(struct sk_buff *skb, struct net_device *dev,
 	frame_len = (skb->len)*3+31;
 
 	if (debug) {
-		pr_info( "Test protocol: Packet Received with length: %u\n", skb->len+18 );
+		pr_info("Test protocol: Packet Received with length: %u\n", skb->len+18);
 	}
 
-	if ( down_interruptible( &pktdev_sem ) ) {
-		pr_info( "down_interruptible for read failed\n" );
+	if (down_interruptible(&pktdev_sem)) {
+		pr_info("down_interruptible for read failed\n");
 		return -ERESTARTSYS;
 	}
 
-	if ( (pbuf0.rx_write_ptr + frame_len + 0x10) > pbuf0.rx_end_ptr ) {
-		memcpy( pbuf0.rx_start_ptr, pbuf0.rx_read_ptr, (pbuf0.rx_write_ptr - pbuf0.rx_read_ptr ));
-		pbuf0.rx_write_ptr -= (pbuf0.rx_write_ptr - pbuf0.rx_read_ptr );
+	if ((pbuf0.rx_write_ptr + frame_len + 0x10) > pbuf0.rx_end_ptr) {
+		memcpy(pbuf0.rx_start_ptr, pbuf0.rx_read_ptr,
+			(pbuf0.rx_write_ptr - pbuf0.rx_read_ptr ));
+		pbuf0.rx_write_ptr -= (pbuf0.rx_write_ptr - pbuf0.rx_read_ptr);
 		pbuf0.rx_read_ptr = pbuf0.rx_start_ptr;
 	}
 
 	p = skb_mac_header(skb);
-	for ( i = 0; i < 14; ++i ) {
+	for (i = 0; i < 14; ++i) {
 		*(unsigned short *)pbuf0.rx_write_ptr = _btoa[ p[i] ];
 		pbuf0.rx_write_ptr += 2;
-		if ( pbuf0.rx_write_ptr > pbuf0.rx_end_ptr )
+		if (pbuf0.rx_write_ptr > pbuf0.rx_end_ptr)
 			pbuf0.rx_write_ptr -= (pbuf0.rx_end_ptr - pbuf0.rx_start_ptr + 1);
-		if ( i == 5 || i== 11 || i == 13 ) {
+		if (i == 5 || i== 11 || i == 13) {
 			*pbuf0.rx_write_ptr++ = ' ';
 		}
 	}
 	p = skb->data;
-	for ( i = 0; i < (skb->len) ; ++i) {
+	for (i = 0; i < (skb->len); ++i) {
 		*(unsigned short *)pbuf0.rx_write_ptr = _btoa[ p[i] ];
 		pbuf0.rx_write_ptr += 2;
-		if ( pbuf0.rx_write_ptr > pbuf0.rx_end_ptr )
+		if (pbuf0.rx_write_ptr > pbuf0.rx_end_ptr)
 			pbuf0.rx_write_ptr -= (pbuf0.rx_end_ptr - pbuf0.rx_start_ptr + 1);
-		if ( likely( i != ((skb->len) - 1 ) ) ) {
+		if (likely(i != ((skb->len) - 1))) {
 			*pbuf0.rx_write_ptr++ = ' ';
 		} else {
 			*pbuf0.rx_write_ptr++ = '\n';
 		}
-		if ( pbuf0.rx_write_ptr > pbuf0.rx_end_ptr )
+		if (pbuf0.rx_write_ptr > pbuf0.rx_end_ptr)
 			pbuf0.rx_write_ptr -= (pbuf0.rx_end_ptr - pbuf0.rx_start_ptr + 1);
 	}
 
@@ -256,18 +257,19 @@ static ssize_t pktdev_read(struct file *filp, char __user *buf,
 
 	func_enter();
 
-	if ( wait_event_interruptible( read_q, ( pbuf0.rx_read_ptr != pbuf0.rx_write_ptr ) ) )
+	if (wait_event_interruptible(read_q,
+		(pbuf0.rx_read_ptr != pbuf0.rx_write_ptr)))
 		return -ERESTARTSYS;
 
 	available_read_len = (pbuf0.rx_write_ptr - pbuf0.rx_read_ptr);
 
-	if ( count > available_read_len )
+	if (count > available_read_len)
 		copy_len = available_read_len;
 	else
 		copy_len = count;
 
-	if ( copy_to_user( buf, pbuf0.rx_read_ptr, copy_len ) ) {
-		pr_info( "copy_to_user failed\n" );
+	if (copy_to_user(buf, pbuf0.rx_read_ptr, copy_len)) {
+		pr_info("copy_to_user failed\n");
 		return -EFAULT;
 	}
 
@@ -526,17 +528,17 @@ static int pktdev_release(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-static unsigned int pktdev_poll( struct file* filp, poll_table* wait )
+static unsigned int pktdev_poll(struct file* filp, poll_table* wait)
 {
 	unsigned int retmask = 0;
 
 	func_enter();
 
-	poll_wait( filp, &read_q,  wait );
+	poll_wait(filp, &read_q,  wait);
 //	poll_wait( filp, &write_q, wait );
 
-	if ( pbuf0.rx_read_ptr != pbuf0.rx_write_ptr ) {
-		retmask |= ( POLLIN  | POLLRDNORM );
+	if (pbuf0.rx_read_ptr != pbuf0.rx_write_ptr) {
+		retmask |= (POLLIN  | POLLRDNORM);
 	}
 
 	return retmask;
@@ -584,8 +586,8 @@ static int __init pktdev_init(void)
 	pr_info("%s\n", __func__);
 
 	device = dev_get_by_name(&init_net, interface);
-	if ( !device ) {
-		pr_warn( "Could not find %s\n", interface );
+	if (!device) {
+		pr_warn("Could not find %s\n", interface);
 		ret = -1;
 		goto error;
 	}
@@ -594,15 +596,15 @@ static int __init pktdev_init(void)
 //	pd_wq = alloc_workqueue("pktdev", WQ_UNBOUND, 0);
 	pd_wq = create_singlethread_workqueue("pktdev");
 	if (!pd_wq) {
-		pr_err( "alloc_workqueue failed\n" );
+		pr_err("alloc_workqueue failed\n");
 		ret = -ENOMEM;
 		goto out;
 	}
-	INIT_WORK( &work1, pktdev_tx_body );
+	INIT_WORK(&work1, pktdev_tx_body);
 
 	/* Set receive buffer */
-	if ( ( pbuf0.rx_start_ptr = kmalloc(PKT_BUF_SZ, GFP_KERNEL) ) == 0 ) {
-		pr_info( "fail to kmalloc\n" );
+	if ((pbuf0.rx_start_ptr = kmalloc(PKT_BUF_SZ, GFP_KERNEL)) == 0) {
+		pr_info("fail to kmalloc\n");
 		ret = -1;
 		goto error;
 	}
@@ -611,8 +613,8 @@ static int __init pktdev_init(void)
 	pbuf0.rx_read_ptr  = pbuf0.rx_start_ptr;
 
 	/* Set transmitte buffer */
-	if ( ( pbuf0.txbuf_start = kmalloc(PKT_BUF_SZ, GFP_KERNEL) ) == 0 ) {
-		pr_info( "fail to kmalloc\n" );
+	if ((pbuf0.txbuf_start = kmalloc(PKT_BUF_SZ, GFP_KERNEL)) == 0) {
+		pr_info("fail to kmalloc\n");
 		ret = -1;
 		goto error;
 	}
@@ -621,8 +623,8 @@ static int __init pktdev_init(void)
 	pbuf0.txbuf_rd  = pbuf0.txbuf_start;
 
 	/* Set transmitte buffer */
-	if ( ( pbuf0.txring_start = kmalloc(PKT_BUF_SZ, GFP_KERNEL) ) == 0 ) {
-		pr_info( "fail to kmalloc\n" );
+	if ((pbuf0.txring_start = kmalloc(PKT_BUF_SZ, GFP_KERNEL)) == 0) {
+		pr_info("fail to kmalloc\n");
 		ret = -1;
 		goto error;
 	}
@@ -633,17 +635,17 @@ static int __init pktdev_init(void)
 	txring_free = PKT_BUF_SZ;
 
 	/* register character device */
-	sprintf( name, "%s/%s", DRV_NAME, interface );
+	sprintf(name, "%s/%s", DRV_NAME, interface);
 	pktdev_dev.name = name;
 	ret = misc_register(&pktdev_dev);
 	if (ret) {
-		pr_info( "fail to misc_register (MISC_DYNAMIC_MINOR)\n" );
+		pr_info("fail to misc_register (MISC_DYNAMIC_MINOR)\n");
 		goto error;
 	}
 
-	sema_init( &pktdev_sem, 1 );
-	init_waitqueue_head( &read_q );
-	init_waitqueue_head( &write_q );
+	sema_init(&pktdev_sem, 1);
+	init_waitqueue_head(&read_q);
+	init_waitqueue_head(&write_q);
 
 	pktdev_pack.dev = device;
 	dev_add_pack(&pktdev_pack);
@@ -651,18 +653,18 @@ static int __init pktdev_init(void)
 	return 0;
 
 error:
-	if ( pbuf0.rx_start_ptr ) {
-		kfree( pbuf0.rx_start_ptr );
+	if (pbuf0.rx_start_ptr) {
+		kfree(pbuf0.rx_start_ptr);
 		pbuf0.rx_start_ptr = NULL;
 	}
 
-	if ( pbuf0.txbuf_start ) {
-		kfree( pbuf0.txbuf_start );
+	if (pbuf0.txbuf_start) {
+		kfree(pbuf0.txbuf_start);
 		pbuf0.txbuf_start = NULL;
 	}
 
-	if ( pbuf0.txring_start ) {
-		kfree( pbuf0.txring_start );
+	if (pbuf0.txring_start) {
+		kfree(pbuf0.txring_start);
 		pbuf0.txring_start = NULL;
 	}
 
@@ -685,18 +687,18 @@ static void __exit pktdev_cleanup(void)
 
 	dev_remove_pack(&pktdev_pack);
 
-	if ( pbuf0.rx_start_ptr ) {
-		kfree( pbuf0.rx_start_ptr );
+	if (pbuf0.rx_start_ptr) {
+		kfree(pbuf0.rx_start_ptr);
 		pbuf0.rx_start_ptr = NULL;
 	}
 
-	if ( pbuf0.txbuf_start ) {
-		kfree( pbuf0.txbuf_start );
+	if (pbuf0.txbuf_start) {
+		kfree(pbuf0.txbuf_start);
 		pbuf0.txbuf_start = NULL;
 	}
 
-	if ( pbuf0.txring_start ) {
-		kfree( pbuf0.txring_start );
+	if (pbuf0.txring_start) {
+		kfree(pbuf0.txring_start);
 		pbuf0.txring_start = NULL;
 	}
 }
@@ -711,4 +713,4 @@ MODULE_VERSION(VERSION);
 module_param(debug, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(debug, "Enable debug mode");
 module_param( interface , charp , S_IRUGO);
-MODULE_PARM_DESC( interface, "interface" );
+MODULE_PARM_DESC(interface, "interface");
