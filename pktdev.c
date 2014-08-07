@@ -12,6 +12,7 @@
 #include <linux/interrupt.h>
 
 #include <linux/types.h>
+#include <linux/vmalloc.h>
 #include <linux/socket.h>
 #include <linux/kernel.h>
 #include <linux/netlink.h>
@@ -33,9 +34,10 @@
 #define PKTDEV_MAGIC      (0x3776)
 #define PKTDEV_BIN_HDR_SZ (4)
 
-#define MAX_PKT_SZ (9014)
-#define MIN_PKT_SZ (60)
-#define PKT_BUF_SZ (1024*1024*4)
+#define MAX_PKT_SZ  (9014)
+#define MIN_PKT_SZ  (60)
+#define PKT_BUF_SZ  (1024*1024*4)
+#define PKT_RING_SZ (1024*1024*32)
 
 
 #define func_enter() pr_debug("entering %s\n", __func__);
@@ -641,7 +643,7 @@ static int __init pktdev_init(void)
 	pbuf0.txbuf_rd  = pbuf0.txbuf_start;
 
 	/* Set transmitte buffer */
-	if ((pbuf0.txring_start = kmalloc(PKT_BUF_SZ, GFP_KERNEL)) == 0) {
+	if ((pbuf0.txring_start = vmalloc(PKT_RING_SZ)) == 0) {
 		pr_info("fail to kmalloc\n");
 		ret = -1;
 		goto error;
@@ -682,7 +684,7 @@ error:
 	}
 
 	if (pbuf0.txring_start) {
-		kfree(pbuf0.txring_start);
+		vfree(pbuf0.txring_start);
 		pbuf0.txring_start = NULL;
 	}
 
@@ -716,7 +718,7 @@ static void __exit pktdev_cleanup(void)
 	}
 
 	if (pbuf0.txring_start) {
-		kfree(pbuf0.txring_start);
+		vfree(pbuf0.txring_start);
 		pbuf0.txring_start = NULL;
 	}
 }
