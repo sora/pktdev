@@ -644,11 +644,11 @@ static int __init pktdev_init(void)
 
 	/* Set transmitte buffer */
 	if ((pbuf0.txring_start = vmalloc(PKT_RING_SZ)) == 0) {
-		pr_info("fail to kmalloc\n");
+		pr_info("fail to vmalloc\n");
 		ret = -1;
 		goto error;
 	}
-	pbuf0.txring_end = (pbuf0.txring_start + PKT_BUF_SZ - 1);
+	pbuf0.txring_end = (pbuf0.txring_start + PKT_RING_SZ - 1);
 	pbuf0.txring_wr  = pbuf0.txring_start;
 	pbuf0.txring_rd  = pbuf0.txring_start;
 
