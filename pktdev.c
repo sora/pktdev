@@ -136,6 +136,7 @@ struct _pbuf_dma {
 } static pbuf0={0,0,0,0,0,0,0,0,0,0,0,0};
 
 static int txring_free;
+
 static int txq_len = 0;
 struct net_device* device = NULL;
 
@@ -406,12 +407,14 @@ tx_loop:
 		 	tmp_txring_rd -= (pbuf0.txring_end - pbuf0.txring_start);
 		pbuf0.txring_rd =
 			(unsigned char *)((uintptr_t)tmp_txring_rd & 0xfffffffffffffffc);
+	}
+
+	if (waitqueue_active(&write_q)) {
 		pktdev_update_txring_free();
+		wake_up_interruptible(&write_q);
 	}
 
 tx_fail:
-	wake_up_interruptible(&write_q);
-
 	goto tx_loop;
 
 tx_end:
