@@ -137,7 +137,6 @@ struct _pbuf_dma {
 
 static int txring_free;
 
-static int txq_len = 0;
 struct net_device* device = NULL;
 
 /* Module parameters, defaults. */
@@ -237,6 +236,15 @@ static int pktdev_open(struct inode *inode, struct file *filp)
 //	rtnl_lock();
 //	dev_set_promiscuity(device, 1);
 //	rtnl_unlock();
+
+	pktdev_update_txring_free();
+
+	if (debug) {
+		pr_info("entering %s\n", __func__);
+		pr_info("[op] block: max: %d, start: %p, end: %p, txring_free %d, txring_rd: %p, txring_wr: %p\n",
+			(int)PKT_BUF_SZ, pbuf0.txring_start, pbuf0.txring_end, txring_free,
+			pbuf0.txring_rd, pbuf0.txring_wr);
+	}
 
 	return 0;
 }
@@ -345,15 +353,17 @@ static void pktdev_tx_body(struct work_struct *work)
 	int ret, tmplen;
 	struct sk_buff *tx_skb = NULL;
 	unsigned short magic, frame_len;
-	unsigned char *txring_wr_snapshot, *tmp_txring_rd;
+	//unsigned char *txring_wr_snapshot, *tmp_txring_rd;
+	unsigned char *tmp_txring_rd;
 
 	func_enter();
 
-	txring_wr_snapshot = pbuf0.txring_wr;
+	//txring_wr_snapshot = pbuf0.txring_wr;
 
 tx_loop:
 
-	if (pbuf0.txring_rd == txring_wr_snapshot)
+//	if (pbuf0.txring_rd == txring_wr_snapshot)
+	if (pbuf0.txring_rd == pbuf0.txring_wr)
 		goto tx_end;
 
 	tmp_txring_rd = pbuf0.txring_rd;
@@ -409,9 +419,10 @@ tx_loop:
 			(unsigned char *)((uintptr_t)tmp_txring_rd & 0xfffffffffffffffc);
 	}
 
-	if (waitqueue_active(&write_q)) {
-		pktdev_update_txring_free();
-		wake_up_interruptible(&write_q);
+	if (waitqueue_active(&write_q)) {           // if pktdev_wirte is blocked:
+		pktdev_update_txring_free();              //   - update blocking condition
+		wake_up_interruptible(&write_q);          //   - try to wake up blocking
+		//txring_wr_snapshot = pbuf0.txring_wr;     //   - update loop-end
 	}
 
 tx_fail:
@@ -419,7 +430,6 @@ tx_fail:
 
 tx_end:
 err:
-	--txq_len;
 	return;
 }
 
@@ -437,10 +447,8 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 	if ((count >= PKT_BUF_SZ) || (count < MIN_PKT_SZ))
 		return -ENOSPC;
 
-	queue_work(pd_wq, &work1);
-
 	if (wait_event_interruptible(write_q, (txring_free > 524288))) {
-		pr_info("block: max: %d, start: %p, end: %p, txring_free %d, txring_rd: %p, txring_wr: %p\n",
+		pr_info("[wa] block: max: %d, start: %p, end: %p, txring_free %d, txring_rd: %p, txring_wr: %p\n",
 				(int)PKT_BUF_SZ, pbuf0.txring_start, pbuf0.txring_end, txring_free,
 				pbuf0.txring_rd, pbuf0.txring_wr);
 		return -ERESTARTSYS;
@@ -513,7 +521,7 @@ copy_to_ring:
 copy_end:
 
 	// send process
-	if (++txq_len < 30)
+	if(!work_busy(&work1))
 		queue_work(pd_wq, &work1);
 
 	return count;
@@ -522,11 +530,18 @@ copy_end:
 static int pktdev_release(struct inode *inode, struct file *filp)
 {
 
-		func_enter();
+	func_enter();
 
 //	rtnl_lock();
 //	dev_set_promiscuity(device, -1);
 //	rtnl_unlock();
+
+	if (debug) {
+		pr_info("entering %s\n", __func__);
+		pr_info("[cl] block: max: %d, start: %p, end: %p, txring_free %d, txring_rd: %p, txring_wr: %p\n",
+				(int)PKT_BUF_SZ, pbuf0.txring_start, pbuf0.txring_end, txring_free,
+				pbuf0.txring_rd, pbuf0.txring_wr);
+	}
 
 	return 0;
 }
