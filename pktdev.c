@@ -408,7 +408,7 @@ tx_loop:
 		// sending
 		ret = packet_direct_xmit(tx_skb);
 		if (ret) {
-			if (ret == 0x10) {    // TX_BUSY
+			if (ret == NETDEV_TX_BUSY) {
 				//pr_info( "fail packet_direct_xmit=%d\n", ret );
 				goto tx_fail;
 			}
