@@ -355,7 +355,6 @@ static void pktdev_tx_body(struct work_struct *work)
 	int ret, tmplen;
 	struct sk_buff *tx_skb = NULL;
 	unsigned short magic, frame_len;
-	//unsigned char *txring_wr_snapshot, *tmp_txring_rd;
 	unsigned char *tmp_txring_rd;
 
 	func_enter();
@@ -364,7 +363,6 @@ static void pktdev_tx_body(struct work_struct *work)
 
 tx_loop:
 
-//	if (pbuf0.txring_rd == txring_wr_snapshot)
 	if (pbuf0.txring_rd == pbuf0.txring_wr)
 		goto tx_end;
 
@@ -424,7 +422,6 @@ tx_loop:
 	if (waitqueue_active(&write_q)) {           // if pktdev_wirte is blocked:
 		pktdev_update_txring_free();              //   - update blocking condition
 		wake_up_interruptible(&write_q);          //   - try to wake up blocking
-		//txring_wr_snapshot = pbuf0.txring_wr;     //   - update loop-end
 	}
 
 tx_fail:
