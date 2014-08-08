@@ -535,12 +535,12 @@ static int __init pktdev_init(void)
 	INIT_WORK(&work1, pktdev_tx_body);
 
 	/* Set receive buffer */
-	if ((pbuf0.rx_start_ptr = kmalloc(PKT_BUF_SZ, GFP_KERNEL)) == 0) {
-		pr_info("fail to kmalloc\n");
+	if ((pbuf0.rx_start_ptr = vmalloc(PKT_RING_SZ)) == 0) {
+		pr_info("fail to vmalloc\n");
 		ret = -1;
 		goto error;
 	}
-	pbuf0.rx_end_ptr = (pbuf0.rx_start_ptr + PKT_BUF_SZ - 1);
+	pbuf0.rx_end_ptr = (pbuf0.rx_start_ptr + PKT_RING_SZ - 1);
 	pbuf0.rx_write_ptr = pbuf0.rx_start_ptr;
 	pbuf0.rx_read_ptr  = pbuf0.rx_start_ptr;
 
@@ -586,7 +586,7 @@ static int __init pktdev_init(void)
 
 error:
 	if (pbuf0.rx_start_ptr) {
-		kfree(pbuf0.rx_start_ptr);
+		vfree(pbuf0.rx_start_ptr);
 		pbuf0.rx_start_ptr = NULL;
 	}
 
@@ -620,7 +620,7 @@ static void __exit pktdev_cleanup(void)
 	dev_remove_pack(&pktdev_pack);
 
 	if (pbuf0.rx_start_ptr) {
-		kfree(pbuf0.rx_start_ptr);
+		vfree(pbuf0.rx_start_ptr);
 		pbuf0.rx_start_ptr = NULL;
 	}
 
