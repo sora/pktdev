@@ -1,19 +1,31 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #define PKTDEV_HDRLEN    (4)
 #define ETH_HDRLEN       (14)
 
-int main()
+int main(int argc, char **argv)
 {
 	unsigned char ibuf[2000], obuf[6000];
-	int i;
+	int fd, i;
 	unsigned short magic, pktlen;
 	int olen;
 
+	if (argc != 2) {
+		printf("Usage: ./btoa /dev/pkt/eth0\n");
+		return 1;
+	}
+
+	fd = open(argv[1], O_RDONLY);
+	if (fd < 0) {
+		fprintf(stderr, "cannot open pktdev device: %s\n", argv[1]);
+		return 1;
+	}
+
 	while (1) {
-		if (read(0, ibuf, PKTDEV_HDRLEN) <= 0)
+		if (read(fd, ibuf, PKTDEV_HDRLEN) <= 0)
 			break;
 		magic = *(short *)&ibuf[0];
 		pktlen = *(short *)&ibuf[2];
@@ -26,7 +38,7 @@ int main()
 			return 1;
 		}
 
-		if (read(0, ibuf, pktlen) <= 0)
+		if (read(fd, ibuf, pktlen) <= 0)
 			break;
 		sprintf(obuf, "%02X%02X%02X%02X%02X%02X %02X%02X%02X%02X%02X%02X %02X%02X",
 				ibuf[ 0], ibuf[ 1], ibuf[ 2], ibuf[ 3], ibuf[ 4], ibuf[ 5],
