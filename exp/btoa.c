@@ -15,10 +15,8 @@ int main()
 	while (1) {
 		if (read(0, ibuf, PKTDEV_HDRLEN) <= 0)
 			break;
-		//magic = *(short *)&ibuf[0];
-		//pktlen = *(short *)&ibuf[2];
-		magic = (ibuf[0] << 8) | ibuf[1];
-		pktlen = (ibuf[2] << 8) | ibuf[3];
+		magic = *(short *)&ibuf[0];
+		pktlen = *(short *)&ibuf[2];
 		if (magic != 0x3776) {
 			printf("format error: magic code %X %X\n", magic, pktlen);
 			return 1;
@@ -27,7 +25,7 @@ int main()
 			printf("format size: pktlen %X\n", pktlen);
 			return 1;
 		}
-		
+
 		if (read(0, ibuf, pktlen) <= 0)
 			break;
 		sprintf(obuf, "%02X%02X%02X%02X%02X%02X %02X%02X%02X%02X%02X%02X %02X%02X",
@@ -43,4 +41,3 @@ int main()
 	}
 	return 0;
 }
-
