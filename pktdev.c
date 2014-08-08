@@ -284,7 +284,7 @@ tx_loop:
 	tmp_txring_rd = pbuf0.txring_rd;
 
 	// check magic code header
-	magic = *(unsigned short *)tmp_txring_rd[0];
+	magic = *(unsigned short *)&tmp_txring_rd[0];
 	if (unlikely(magic != PKTDEV_MAGIC)) {
 		pr_info("[wq] format error: magic code %X, rd %p, wr %p\n",
 		(int)magic, tmp_txring_rd, pbuf0.txring_wr );
@@ -292,7 +292,7 @@ tx_loop:
 	}
 
 	// check frame_len header
-	frame_len = *(unsigned short *)tmp_txring_rd[2];
+	frame_len = *(unsigned short *)&tmp_txring_rd[2];
 	if (unlikely((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ))) {
 		pr_info("[wq] data size error: %X, rd %p, wr %p\n",
 			(int)frame_len, tmp_txring_rd, pbuf0.txring_wr);
@@ -386,14 +386,14 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 copy_to_ring:
 
 	// check magic code header
-	magic = *(unsigned short *)pbuf0.txbuf_rd[0];
+	magic = *(unsigned short *)&pbuf0.txbuf_rd[0];
 	if (unlikely(magic != PKTDEV_MAGIC)) {
 		pr_info("[wr] data format error: magic code: %X\n", (int)magic);
 		return -EFAULT;
 	}
 
 	// check frame_len header
-	frame_len = *(unsigned short *)pbuf0.txbuf_rd[2];
+	frame_len = *(unsigned short *)&pbuf0.txbuf_rd[2];
 	if (unlikely((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ))) {
 		pr_info("[wr] data size error: %X\n", (int)frame_len);
 		return -EFAULT;
