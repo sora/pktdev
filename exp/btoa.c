@@ -33,7 +33,7 @@ int main(int argc, char **argv)
 			printf("format error: magic code %X %X\n", magic, pktlen);
 			return 1;
 		}
-		if ((pktlen < 60) || (pktlen > 1518)) {
+		if ((pktlen < 40) || (pktlen > 9014)) {
 			printf("format size: pktlen %X\n", pktlen);
 			return 1;
 		}
