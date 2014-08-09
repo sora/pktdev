@@ -6,20 +6,20 @@
 int main(int argc, char **argv)
 {
 	unsigned char obuf[6000];
-  int fd, ret, linelen = 0, pktlen;
+	int fd, ret, linelen = 0, pktlen;
 	size_t linecap = 0;
 	char *line = NULL, c, *cp, pos;
 
-  if (argc != 2) {
-    printf("Usage: ./atob /dev/pkt/eth0\n");
-    return 1;
-  }
+	if (argc != 2) {
+		printf("Usage: ./atob /dev/pkt/eth0\n");
+		return 1;
+	}
 
-  fd = open(argv[1], O_WRONLY);
-  if (fd < 0) {
-    fprintf(stderr, "cannot open pktdev device: %s\n", argv[1]);
-    return 1;
-  }
+	fd = open(argv[1], O_WRONLY);
+	if (fd < 0) {
+		fprintf(stderr, "cannot open pktdev device: %s\n", argv[1]);
+		return 1;
+	}
 
 	while ((linelen = getline(&line, &linecap, stdin)) != -1) {
 		pos = 0;
@@ -76,10 +76,10 @@ int main(int argc, char **argv)
 	}
 
 out:
-  close(fd);
+	close(fd);
 
 	if (line)
 		free(line);
 
-  return ret;
+	return ret;
 }
