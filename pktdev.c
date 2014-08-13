@@ -25,7 +25,6 @@
 #include <linux/skbuff.h>
 #include <linux/init.h>
 
-#include <linux/workqueue.h>
 #include <linux/kthread.h>
 #include <linux/if_packet.h>
 #include <linux/delay.h>
@@ -48,10 +47,6 @@
 static struct semaphore pktdev_sem;
 static wait_queue_head_t write_q;
 static wait_queue_head_t read_q;
-
-/* workqueue */
-static struct workqueue_struct *pd_wq;
-static struct work_struct do_xmit;
 
 struct pktdev_thread {
 	unsigned int cpu;
@@ -278,7 +273,7 @@ drop:
  * |                       |
  * +-----------------------+
  */
-static void pktdev_tx_body(struct work_struct *work)
+static void pktdev_tx_body(int cpu)
 {
 	int ret, tmplen;
 	struct sk_buff *tx_skb = NULL;
@@ -291,30 +286,30 @@ static void pktdev_tx_body(struct work_struct *work)
 
 tx_loop:
 
-	if (txring[0].read_ptr == txring[0].write_ptr)
+	if (txring[cpu].read_ptr == txring[cpu].write_ptr)
 		goto tx_end;
 
-	tmp_txring_rd = txring[0].read_ptr;
+	tmp_txring_rd = txring[cpu].read_ptr;
 
 	// check magic code header
 	magic = *(unsigned short *)&tmp_txring_rd[0];
 	if (unlikely(magic != PKTDEV_MAGIC)) {
-		pr_info("[wq] format error: magic code %X, rd %p, wr %p\n",
-		(int)magic, tmp_txring_rd, txring[0].write_ptr );
+		pr_info("[cpu%d] format error: magic code %X, rd %p, wr %p\n",
+		cpu, (int)magic, tmp_txring_rd, txring[cpu].write_ptr);
 		goto err;
 	}
 
 	// check frame_len header
 	frame_len = *(unsigned short *)&tmp_txring_rd[2];
 	if (unlikely((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ))) {
-		pr_info("[wq] data size error: %X, rd %p, wr %p\n",
-			(int)frame_len, tmp_txring_rd, txring[0].write_ptr);
+		pr_info("[cpu%d] data size error: %X, rd %p, wr %p\n",
+			cpu, (int)frame_len, tmp_txring_rd, txring[cpu].write_ptr);
 		goto err;
 	}
 
 	tmp_txring_rd += 4;
-	if (tmp_txring_rd > txring[0].end_ptr)
-		tmp_txring_rd -= (txring[0].end_ptr - txring[0].start_ptr);
+	if (tmp_txring_rd > txring[cpu].end_ptr)
+		tmp_txring_rd -= (txring[cpu].end_ptr - txring[cpu].start_ptr);
 
 	// alloc skb
 	tx_skb = netdev_alloc_skb(device, frame_len);
@@ -323,10 +318,10 @@ tx_loop:
 
 		// fill packet
 		skb_put(tx_skb, frame_len);
-		if ((tmp_txring_rd + frame_len) > txring[0].end_ptr) {
-			tmplen = txring[0].end_ptr - tmp_txring_rd;
+		if ((tmp_txring_rd + frame_len) > txring[cpu].end_ptr) {
+			tmplen = txring[cpu].end_ptr - tmp_txring_rd;
 			memcpy(tx_skb->data, tmp_txring_rd, tmplen);
-			memcpy(tx_skb->data + tmplen, txring[0].start_ptr, (frame_len - tmplen));
+			memcpy(tx_skb->data + tmplen, txring[cpu].start_ptr, (frame_len - tmplen));
 		} else {
 			memcpy(tx_skb->data, tmp_txring_rd, frame_len);
 		}
@@ -341,9 +336,9 @@ tx_loop:
 		}
 
 		tmp_txring_rd += frame_len;
-		if (tmp_txring_rd > txring[0].end_ptr)
-		 	tmp_txring_rd -= (txring[0].end_ptr - txring[0].start_ptr);
-		txring[0].read_ptr =
+		if (tmp_txring_rd > txring[cpu].end_ptr)
+			tmp_txring_rd -= (txring[cpu].end_ptr - txring[cpu].start_ptr);
+		txring[cpu].read_ptr =
 			(unsigned char *)((uintptr_t)tmp_txring_rd & 0xfffffffffffffffc);
 	}
 
@@ -447,10 +442,6 @@ copy_to_ring:
 
 copy_end:
 
-	// send process
-	if(!work_busy(&do_xmit))
-		queue_work_on(txring[0].cpu, pd_wq, &do_xmit);
-
 	return count;
 }
 
@@ -552,6 +543,7 @@ static int pktdev_thread_worker(void *arg)
 
 	while (!kthread_should_stop()) {
 		pr_info("[kthread] my cpu is %d (%d)\n", cpu, i++);
+		pktdev_tx_body(cpu);
 		msleep_interruptible(1000); // a sec
 	}
 
@@ -610,20 +602,8 @@ static int __init pktdev_init(void)
 		goto error;
 	}
 
-	/* workqueue */
-//	pd_wq = alloc_workqueue("kpktdevd", WQ_UNBOUND, 0);
-	pd_wq = create_workqueue("kpktdevd");
-	if (!pd_wq) {
-		pr_err("alloc_workqueue failed\n");
-		ret = -ENOMEM;
-		goto out;
-	}
-	INIT_WORK(&do_xmit, pktdev_tx_body);
-
-	// create xmit kthreads
-	INIT_LIST_HEAD(&pktdev_threads.list);
-
 	// setup xmit buffers and threads
+	INIT_LIST_HEAD(&pktdev_threads.list);
 	for_each_online_cpu(cpu) {
 		int err;
 
@@ -724,7 +704,6 @@ error:
 		kfree(t);
 	}
 
-out:
 	return ret;
 }
 
@@ -735,13 +714,6 @@ static void __exit pktdev_cleanup(void)
 	func_enter();
 
 	misc_deregister(&pktdev_dev);
-
-	/* workqueue */
-	if (pd_wq) {
-		flush_workqueue(pd_wq);
-		destroy_workqueue(pd_wq);
-		pd_wq = NULL;
-	}
 
 	/* rx */
 	dev_remove_pack(&pktdev_pack);
