@@ -28,6 +28,7 @@
 #include <linux/kthread.h>
 #include <linux/if_packet.h>
 #include <linux/delay.h>
+#include <linux/jiffies.h>
 
 #define VERSION  "0.0.0"
 #define DRV_NAME "pkt"
@@ -91,7 +92,7 @@ static int pktdev_pack_rcv(struct sk_buff *skb, struct net_device *dev,
 static int pktdev_open(struct inode *inode, struct file *filp);
 static ssize_t pktdev_read(struct file *filp, char __user *buf,
 				size_t count, loff_t *ppos);
-static int packet_direct_xmit(struct sk_buff *skb);
+static int pktdev_direct_xmit(struct sk_buff *skb, int cpu);
 static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 				size_t count, loff_t *ppos);
 static int pktdev_release(struct inode *inode, struct file *filp);
@@ -213,7 +214,7 @@ static ssize_t pktdev_read(struct file *filp, char __user *buf,
 }
 
 /* from af_packet.c */
-static int packet_direct_xmit(struct sk_buff *skb)
+static int pktdev_direct_xmit(struct sk_buff *skb, int cpu)
 {
 	struct net_device *dev = skb->dev;
 	const struct net_device_ops *ops = dev->netdev_ops;
@@ -236,7 +237,7 @@ static int packet_direct_xmit(struct sk_buff *skb)
 
 	local_bh_disable();
 
-	HARD_TX_LOCK(dev, txq, smp_processor_id());
+	HARD_TX_LOCK(dev, txq, cpu);
 
 	if (!netif_xmit_frozen_or_drv_stopped(txq)) {
 		ret = ops->ndo_start_xmit(skb, dev);
@@ -327,10 +328,10 @@ tx_loop:
 		}
 
 		// sending
-		ret = packet_direct_xmit(tx_skb);
+		ret = pktdev_direct_xmit(tx_skb, cpu);
 		if (ret) {
 			if (ret == NETDEV_TX_BUSY) {
-				//pr_info( "fail packet_direct_xmit=%d\n", ret );
+				//pr_info( "fail pktdev_direct_xmit=%d\n", ret );
 				goto tx_fail;
 			}
 		}
@@ -542,9 +543,13 @@ static int pktdev_thread_worker(void *arg)
 	pr_info("starting pktdev/%d:  pid=%d\n", cpu, task_pid_nr(current));
 
 	while (!kthread_should_stop()) {
-		pr_info("[kthread] my cpu is %d (%d)\n", cpu, i++);
+		pr_info("[kthread] my cpu is %d (%d, HZ=%d)\n", cpu, i++, HZ);
+
+		__set_current_state(TASK_RUNNING);
 		pktdev_tx_body(cpu);
-		msleep_interruptible(1000); // a sec
+		//msleep_interruptible(1000); // a sec
+		set_current_state(TASK_INTERRUPTIBLE);
+		schedule_timeout(HZ/10);
 	}
 
 	pr_info("kthread_exit: cpu=%d\n", cpu);
