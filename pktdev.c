@@ -54,6 +54,7 @@ static struct work_struct do_xmit;
 struct pktdev_thread {
 	unsigned int cpu;
 	struct task_struct *tsk;
+	unsigned char *ring_ptr;
 	struct list_head list;
 };
 static struct pktdev_thread pktdev_threads;
@@ -519,6 +520,23 @@ static struct packet_type pktdev_pack =
 	NULL
 };
 
+/* malloc transmittion ring buffer */
+static int pktdev_create_txring(int cpu)
+{
+	if ((txring[cpu].start_ptr = vmalloc_node(PKT_RING_SZ,
+			cpu_to_node(cpu))) == 0) {
+		pr_info("fail to vmalloc: cpu=%d\n", cpu);
+		return -ENOMEM;
+	}
+	txring[cpu].cpu       = cpu;
+	txring[cpu].end_ptr   = (txring[cpu].start_ptr + PKT_RING_SZ - 1);
+	txring[cpu].write_ptr = txring[cpu].start_ptr;
+	txring[cpu].read_ptr  = txring[cpu].start_ptr;
+	txring[cpu].available = PKT_BUF_SZ;
+
+	return 0;
+}
+
 static int pktdev_create_tx_thread(int cpu)
 {
 	struct pktdev_thread *t;
@@ -531,24 +549,9 @@ static int pktdev_create_tx_thread(int cpu)
 	}
 
 	t->cpu = cpu;
+	t->ring_ptr = txring[cpu].start_ptr;
 
 	list_add_tail(&t->list, &pktdev_threads.list);
-
-	return 0;
-}
-
-/* malloc transmittion ring buffer */
-static int pktdev_create_txring(int cpu)
-{
-	if ((txring[cpu].start_ptr = vmalloc(PKT_RING_SZ)) == 0) {
-		pr_info("fail to vmalloc: cpu=%d\n", cpu);
-		return -ENOMEM;
-	}
-	txring[cpu].cpu       = cpu;
-	txring[cpu].end_ptr   = (txring[cpu].start_ptr + PKT_RING_SZ - 1);
-	txring[cpu].write_ptr = txring[cpu].start_ptr;
-	txring[cpu].read_ptr  = txring[cpu].start_ptr;
-	txring[cpu].available = PKT_BUF_SZ;
 
 	return 0;
 }
@@ -597,7 +600,7 @@ static int __init pktdev_init(void)
 		if (err)
 			pr_info("cannot create txring for cpu %d (%d)\n", cpu, err);
 
-		// tx kthread
+		// tx thread
 		err = pktdev_create_tx_thread(cpu);
 		if (err)
 			pr_info("cannot create thread for cpu %d (%d)\n", cpu, err);
@@ -664,10 +667,12 @@ error:
 		pbuf0.txbuf_start = NULL;
 	}
 
-	for(i = 0; i < MAX_CPUS; i++) {
-		if (txring[i].start_ptr) {
-			vfree(txring[i].start_ptr);
-			txring[i].start_ptr = NULL;
+	list_for_each_entry(t, &pktdev_threads.list, list) {
+		pr_info("vfree on cpu%d\n", t->cpu);
+		if (txring[t->cpu].start_ptr) {
+			vfree(txring[t->cpu].start_ptr);
+			txring[t->cpu].start_ptr = NULL;
+			t->ring_ptr = NULL;
 		}
 	}
 
@@ -677,7 +682,7 @@ out:
 
 static void __exit pktdev_cleanup(void)
 {
-	int i;
+	struct pktdev_thread *t;
 
 	func_enter();
 
@@ -702,10 +707,12 @@ static void __exit pktdev_cleanup(void)
 		pbuf0.txbuf_start = NULL;
 	}
 
-	for(i = 0; i < MAX_CPUS; i++) {
-		if (txring[i].start_ptr) {
-			vfree(txring[i].start_ptr);
-			txring[i].start_ptr = NULL;
+	list_for_each_entry(t, &pktdev_threads.list, list) {
+		if (txring[t->cpu].start_ptr) {
+			pr_info("vfree on cpu%d\n", t->cpu);
+			vfree(txring[t->cpu].start_ptr);
+			txring[t->cpu].start_ptr = NULL;
+			t->ring_ptr = NULL;
 		}
 	}
 }
