@@ -26,7 +26,9 @@
 #include <linux/init.h>
 
 #include <linux/workqueue.h>
+#include <linux/kthread.h>
 #include <linux/if_packet.h>
+#include <linux/delay.h>
 
 #define VERSION  "0.0.0"
 #define DRV_NAME "pkt"
@@ -56,6 +58,7 @@ struct pktdev_thread {
 	struct task_struct *tsk;
 	unsigned char *ring_ptr;
 	struct list_head list;
+	struct completion start_done;
 };
 static struct pktdev_thread pktdev_threads;
 
@@ -537,9 +540,30 @@ static int pktdev_create_txring(int cpu)
 	return 0;
 }
 
+static int pktdev_thread_worker(void *arg)
+{
+	struct pktdev_thread *t = arg;
+	int cpu = t->cpu;
+	int i = 0;
+
+	complete(&t->start_done);
+
+	pr_info("starting pktdev/%d:  pid=%d\n", cpu, task_pid_nr(current));
+
+	while (!kthread_should_stop()) {
+		pr_info("[kthread] my cpu is %d (%d)\n", cpu, i++);
+		msleep_interruptible(1000); // a sec
+	}
+
+	pr_info("kthread_exit: cpu=%d\n", cpu);
+
+	return 0;
+}
+
 static int pktdev_create_tx_thread(int cpu)
 {
 	struct pktdev_thread *t;
+	struct task_struct *p;
 
 	t = kzalloc_node(sizeof(struct pktdev_thread), GFP_KERNEL,
 			cpu_to_node(cpu));
@@ -547,11 +571,26 @@ static int pktdev_create_tx_thread(int cpu)
 		pr_info("error: out of memory, can't create new thread\n");
 		return -ENOMEM;
 	}
-
 	t->cpu = cpu;
 	t->ring_ptr = txring[cpu].start_ptr;
-
 	list_add_tail(&t->list, &pktdev_threads.list);
+
+	init_completion(&t->start_done);
+	p = kthread_create_on_node(pktdev_thread_worker,
+			t,
+			cpu_to_node(cpu),
+			"kpktdevd_%d", cpu);
+	if (IS_ERR(p)) {
+		pr_info("kernel_thread() failed for cpu %d\n", t->cpu);
+		list_del(&t->list);
+		kfree(t);
+		return PTR_ERR(p);
+	}
+	kthread_bind(p, cpu);
+	t->tsk = p;
+
+	wake_up_process(p);
+	wait_for_completion(&t->start_done);
 
 	return 0;
 }
@@ -560,7 +599,7 @@ static int __init pktdev_init(void)
 {
 	int ret, cpu, i = 0;
 	static char name[16];
-	struct pktdev_thread *t;
+	struct pktdev_thread *t, *n;
 
 	pr_info("%s\n", __func__);
 
@@ -657,6 +696,8 @@ static int __init pktdev_init(void)
 	return 0;
 
 error:
+	pr_info("got error in pktdev_init()\n");
+
 	if (pbuf0.rx_start_ptr) {
 		vfree(pbuf0.rx_start_ptr);
 		pbuf0.rx_start_ptr = NULL;
@@ -676,13 +717,20 @@ error:
 		}
 	}
 
+	/* kthread */
+	list_for_each_entry_safe(t, n, &pktdev_threads.list, list) {
+		list_del(&t->list);
+		kthread_stop(t->tsk);
+		kfree(t);
+	}
+
 out:
 	return ret;
 }
 
 static void __exit pktdev_cleanup(void)
 {
-	struct pktdev_thread *t;
+	struct pktdev_thread *t, *n;
 
 	func_enter();
 
@@ -695,8 +743,10 @@ static void __exit pktdev_cleanup(void)
 		pd_wq = NULL;
 	}
 
+	/* rx */
 	dev_remove_pack(&pktdev_pack);
 
+	/* buffers */
 	if (pbuf0.rx_start_ptr) {
 		vfree(pbuf0.rx_start_ptr);
 		pbuf0.rx_start_ptr = NULL;
@@ -714,6 +764,14 @@ static void __exit pktdev_cleanup(void)
 			txring[t->cpu].start_ptr = NULL;
 			t->ring_ptr = NULL;
 		}
+	}
+
+	/* kthread */
+	list_for_each_entry_safe(t, n, &pktdev_threads.list, list) {
+		pr_info("there is pktdev_cleanup(): cpu=%d\n", t->cpu);
+		list_del(&t->list);
+		kthread_stop(t->tsk);
+		kfree(t);
 	}
 }
 
