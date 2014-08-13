@@ -51,6 +51,13 @@ static wait_queue_head_t read_q;
 static struct workqueue_struct *pd_wq;
 static struct work_struct do_xmit;
 
+struct pktdev_thread {
+	unsigned int cpu;
+	struct task_struct *tsk;
+	struct list_head list;
+};
+static struct pktdev_thread pktdev_threads;
+
 struct _txring {
 	unsigned int  cpu;		/* cpu id */
 	unsigned char *start_ptr;		/* tx buf start */
@@ -512,10 +519,45 @@ static struct packet_type pktdev_pack =
 	NULL
 };
 
+static int pktdev_create_tx_thread(int cpu)
+{
+	struct pktdev_thread *t;
+
+	t = kzalloc_node(sizeof(struct pktdev_thread), GFP_KERNEL,
+			cpu_to_node(cpu));
+	if (!t) {
+		pr_info("error: out of memory, can't create new thread\n");
+		return -ENOMEM;
+	}
+
+	t->cpu = cpu;
+
+	list_add_tail(&t->list, &pktdev_threads.list);
+
+	return 0;
+}
+
+/* malloc transmittion ring buffer */
+static int pktdev_create_txring(int cpu)
+{
+	if ((txring[cpu].start_ptr = vmalloc(PKT_RING_SZ)) == 0) {
+		pr_info("fail to vmalloc: cpu=%d\n", cpu);
+		return -ENOMEM;
+	}
+	txring[cpu].cpu       = cpu;
+	txring[cpu].end_ptr   = (txring[cpu].start_ptr + PKT_RING_SZ - 1);
+	txring[cpu].write_ptr = txring[cpu].start_ptr;
+	txring[cpu].read_ptr  = txring[cpu].start_ptr;
+	txring[cpu].available = PKT_BUF_SZ;
+
+	return 0;
+}
+
 static int __init pktdev_init(void)
 {
 	int ret, cpu, i = 0;
 	static char name[16];
+	struct pktdev_thread *t;
 
 	pr_info("%s\n", __func__);
 
@@ -536,26 +578,35 @@ static int __init pktdev_init(void)
 	}
 	INIT_WORK(&do_xmit, pktdev_tx_body);
 
+	// create xmit kthreads
+	INIT_LIST_HEAD(&pktdev_threads.list);
+
+	// setup xmit buffers and threads
 	for_each_online_cpu(cpu) {
-		pr_info("[init] malloc txring buffer on CPU %d\n", cpu);
+		int err;
+
+		// for debug
 		if (cpu != i++) {
 			pr_info("[init] cpu != i: cpu=%d, i=%d\n", cpu, i);
 			ret = -1;
 			goto error;
 		}
 
-		/* malloc transmitte ring buffer */
-		if ((txring[cpu].start_ptr = vmalloc(PKT_RING_SZ)) == 0) {
-			pr_info("fail to vmalloc: cpu=%d\n", cpu);
-			ret = -1;
-			goto error;
-		}
-		txring[cpu].cpu       = cpu;
-		txring[cpu].end_ptr   = (txring[cpu].start_ptr + PKT_RING_SZ - 1);
-		txring[cpu].write_ptr = txring[cpu].start_ptr;
-		txring[cpu].read_ptr  = txring[cpu].start_ptr;
-		txring[cpu].available = PKT_BUF_SZ;
+		// txring
+		err = pktdev_create_txring(cpu);
+		if (err)
+			pr_info("cannot create txring for cpu %d (%d)\n", cpu, err);
+
+		// tx kthread
+		err = pktdev_create_tx_thread(cpu);
+		if (err)
+			pr_info("cannot create thread for cpu %d (%d)\n", cpu, err);
 	}
+
+	list_for_each_entry(t, &pktdev_threads.list, list) {
+		pr_info("Dump list entries: t->cpu=%d\n", t->cpu);
+	}
+
 	num_cpus = i;
 	if (i < 1 || i != num_online_cpus()) {
 		pr_info("[init] cpus are disabled: i=%d, num_online_cpus=%d\n",
