@@ -15,3 +15,4 @@ $ exp/wr-64b-595pkt /dev/pkt/p2p1
 #### TX overview
 
 ![pktdev-tx](https://raw.githubusercontent.com/wiki/sora/pktdev/i/pktdev-tx.png)
+![pktdev-tx2](https://raw.githubusercontent.com/wiki/sora/pktdev/i/pktdev-tx2.png)
