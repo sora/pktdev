@@ -8,6 +8,6 @@ $ cd pktdev
 $ make
 $ sudo insmod ./pktdev.ko interface=“p2p1”
 $ sudo chmod 777 /dev/pkt/p2p1
-$ (cd exp; gcc -Wall -o wr wr.c)
-$ exp/wr /dev/pkt/p2p1
+$ (cd exp; make)
+$ exp/wr-64b-595pkt /dev/pkt/p2p1
 ```
