@@ -64,7 +64,6 @@ struct _txring {
 	unsigned char *end_ptr;		/* tx buf end */
 	unsigned char *write_ptr;		/* tx write ptr */
 	unsigned char *read_ptr;		/* tx read ptr */
-	unsigned int  available;		/* txring free space */
 } static txring[MAX_CPUS];
 
 static unsigned int num_cpus;
@@ -99,7 +98,7 @@ static int pktdev_release(struct inode *inode, struct file *filp);
 static unsigned int pktdev_poll( struct file* filp, poll_table* wait );
 static long pktdev_ioctl(struct file *filp,
 				unsigned int cmd, unsigned long arg);
-static int pktdev_update_txring_free(void);
+static int pktdev_get_txring_free_space(int cpu);
 
 
 static int pktdev_pack_rcv(struct sk_buff *skb, struct net_device *dev,
@@ -143,7 +142,7 @@ static int pktdev_pack_rcv(struct sk_buff *skb, struct net_device *dev,
 
 	wake_up_interruptible(&read_q);
 
-	up( &pktdev_sem );
+	up(&pktdev_sem);
 
 lend:
 	/* Don't mangle buffer if shared */
@@ -163,26 +162,27 @@ static int pktdev_open(struct inode *inode, struct file *filp)
 	dev_set_promiscuity(device, 1);
 	rtnl_unlock();
 
-	pktdev_update_txring_free();
-
 	if (debug) {
 		pr_info("entering %s\n", __func__);
 		pr_info("[op] block: max: %d, start: %p, end: %p, txring_free %d, txring_rd: %p, txring_wr: %p\n",
-			(int)PKT_BUF_SZ, txring[0].start_ptr, txring[0].end_ptr, txring[0].available,
+			(int)PKT_BUF_SZ, txring[0].start_ptr, txring[0].end_ptr,
+			pktdev_get_txring_free_space(0),
 			txring[0].read_ptr, txring[0].write_ptr);
 	}
 
 	return 0;
 }
 
-static int pktdev_update_txring_free(void)
+static int pktdev_get_txring_free_space(int cpu)
 {
-	if (txring[0].read_ptr > txring[0].write_ptr)
-		txring[0].available = txring[0].read_ptr - txring[0].write_ptr;
-	else
-		txring[0].available = PKT_BUF_SZ - (txring[0].write_ptr - txring[0].read_ptr);
+	unsigned int space;
 
-	return 0;
+	if (txring[cpu].read_ptr > txring[cpu].write_ptr)
+		space = txring[cpu].read_ptr - txring[cpu].write_ptr;
+	else
+		space = PKT_BUF_SZ - (txring[cpu].write_ptr - txring[cpu].read_ptr);
+
+	return space;
 }
 
 static ssize_t pktdev_read(struct file *filp, char __user *buf,
@@ -344,7 +344,6 @@ tx_loop:
 	}
 
 	if (waitqueue_active(&write_q)) {           // if pktdev_wirte is blocked:
-		pktdev_update_txring_free();              //   - update blocking condition
 		wake_up_interruptible(&write_q);          //   - try to wake up blocking
 	}
 
@@ -356,6 +355,15 @@ err:
 	return;
 }
 
+#if 0
+/* simple hash generator */
+static int pktdev_get_hash(struct skbuff *skb)
+{
+	//u32 hash;
+	return 0;
+}
+#endif
+
 static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 			    size_t count, loff_t *ppos)
 {
@@ -364,15 +372,17 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 	unsigned short magic, frame_len;
 	static unsigned char fragment[MAX_PKT_SZ];
 	unsigned char *tmp_txring_wr;
+	unsigned int ring_no;
 
 	func_enter();
 
 	if ((count >= PKT_BUF_SZ) || (count < MIN_PKT_SZ))
 		return -ENOSPC;
 
-	if (wait_event_interruptible(write_q, (txring[0].available > 524288))) {
+	if (wait_event_interruptible(write_q, (pktdev_get_txring_free_space(0) > 524288))) {
 		pr_info("[wa] block: max: %d, start: %p, end: %p, txring_free %d, txring_rd: %p, txring_wr: %p\n",
-				(int)PKT_BUF_SZ, txring[0].start_ptr, txring[0].end_ptr, txring[0].available,
+				(int)PKT_BUF_SZ, txring[0].start_ptr, txring[0].end_ptr,
+				pktdev_get_txring_free_space(0),
 				txring[0].read_ptr, txring[0].write_ptr);
 		return -ERESTARTSYS;
 	}
@@ -418,13 +428,18 @@ copy_to_ring:
 		goto copy_end;
 	}
 
+	// txqueue selecter
+	//ring_no = pktdev_get_hash(pbuf0.txbuf_start) % num_cpus;
+	//if ( pktdev_get_txring_space)
+	ring_no = 0;
+
 	// txbuf to txring
-	tmp_txring_wr = txring[0].write_ptr;
-	if ((tmp_txring_wr + len) > txring[0].end_ptr) {
-		tmplen = txring[0].end_ptr - tmp_txring_wr;
+	tmp_txring_wr = txring[ring_no].write_ptr;
+	if ((tmp_txring_wr + len) > txring[ring_no].end_ptr) {
+		tmplen = txring[ring_no].end_ptr - tmp_txring_wr;
 		memcpy(tmp_txring_wr, pbuf0.txbuf_rd, tmplen);
-		memcpy(txring[0].start_ptr, (pbuf0.txbuf_rd + tmplen), (len - tmplen));
-		tmp_txring_wr = txring[0].start_ptr + (len - tmplen);
+		memcpy(txring[ring_no].start_ptr, (pbuf0.txbuf_rd + tmplen), (len - tmplen));
+		tmp_txring_wr = txring[ring_no].start_ptr + (len - tmplen);
 	} else {
 		memcpy(tmp_txring_wr, pbuf0.txbuf_rd, len);
 	 	tmp_txring_wr+= len;
@@ -432,9 +447,8 @@ copy_to_ring:
 	pbuf0.txbuf_rd += len;
 
 	// update ring write pointer with memory alignment
-	txring[0].write_ptr =
+	txring[ring_no].write_ptr =
 		(unsigned char *)((uintptr_t)tmp_txring_wr & 0xfffffffffffffffc);
-	pktdev_update_txring_free();
 
 	if (count == (pbuf0.txbuf_rd - pbuf0.txbuf_start))
 		goto copy_end;
@@ -458,7 +472,8 @@ static int pktdev_release(struct inode *inode, struct file *filp)
 	if (debug) {
 		pr_info("entering %s\n", __func__);
 		pr_info("[cl] block: max: %d, start: %p, end: %p, txring_free %d, txring_rd: %p, txring_wr: %p\n",
-				(int)PKT_BUF_SZ, txring[0].start_ptr, txring[0].end_ptr, txring[0].available,
+				(int)PKT_BUF_SZ, txring[0].start_ptr, txring[0].end_ptr,
+				pktdev_get_txring_free_space(0),
 				txring[0].read_ptr, txring[0].write_ptr);
 	}
 
@@ -527,7 +542,6 @@ static int pktdev_create_txring(int cpu)
 	txring[cpu].end_ptr   = (txring[cpu].start_ptr + PKT_RING_SZ - 1);
 	txring[cpu].write_ptr = txring[cpu].start_ptr;
 	txring[cpu].read_ptr  = txring[cpu].start_ptr;
-	txring[cpu].available = PKT_BUF_SZ;
 
 	return 0;
 }
