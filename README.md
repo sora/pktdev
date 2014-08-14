@@ -12,6 +12,21 @@ $ (cd exp; make)
 $ exp/wr-64b-595pkt /dev/pkt/p2p1
 ```
 
+#### packet format (version 1)
+
+````bash
+0                      16 (bit)
++-----------------------+
+|  Magic code (0x3776)  |
++-----------------------+
+|      Frame length     |
++-----------------------+
+|                       |
+|      Packet data      |
+|                       |
++-----------------------+
+````
+
 #### TX overview
 
 ![pktdev-tx](https://raw.githubusercontent.com/wiki/sora/pktdev/i/pktdev-tx.png)
