@@ -64,6 +64,8 @@ struct _txring {
 	unsigned char *end_ptr;		/* tx buf end */
 	unsigned char *write_ptr;		/* tx write ptr */
 	unsigned char *read_ptr;		/* tx read ptr */
+	wait_queue_head_t thq;
+	int waiting;
 } static txring[MAX_CPUS];
 
 static unsigned int num_cpus;
@@ -343,26 +345,25 @@ tx_loop:
 			(unsigned char *)((uintptr_t)tmp_txring_rd & 0xfffffffffffffffc);
 	}
 
-	if (waitqueue_active(&write_q)) {           // if pktdev_wirte is blocked:
-		wake_up_interruptible(&write_q);          //   - try to wake up blocking
-	}
-
 tx_fail:
 	goto tx_loop;
 
 tx_end:
 err:
+	txring[cpu].waiting = 1;
 	return;
 }
 
-#if 0
 /* simple hash generator */
-static int pktdev_get_hash(struct skbuff *skb)
+static unsigned int ii = 0;
+static int pktdev_get_hash(unsigned char *pkt_ptr)
 {
 	//u32 hash;
-	return 0;
+
+	ii++;
+
+	return ii;
 }
-#endif
 
 static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 			    size_t count, loff_t *ppos)
@@ -378,14 +379,6 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 
 	if ((count >= PKT_BUF_SZ) || (count < MIN_PKT_SZ))
 		return -ENOSPC;
-
-	if (wait_event_interruptible(write_q, (pktdev_get_txring_free_space(0) > 524288))) {
-		pr_info("[wa] block: max: %d, start: %p, end: %p, txring_free %d, txring_rd: %p, txring_wr: %p\n",
-				(int)PKT_BUF_SZ, txring[0].start_ptr, txring[0].end_ptr,
-				pktdev_get_txring_free_space(0),
-				txring[0].read_ptr, txring[0].write_ptr);
-		return -ERESTARTSYS;
-	}
 
 	pbuf0.txbuf_wr = pbuf0.txbuf_start;
 	pbuf0.txbuf_rd = pbuf0.txbuf_start;
@@ -429,26 +422,32 @@ copy_to_ring:
 	}
 
 	// txqueue selecter
-	//ring_no = pktdev_get_hash(pbuf0.txbuf_start) % num_cpus;
-	//if ( pktdev_get_txring_space)
-	ring_no = 0;
+	ring_no = pktdev_get_hash(pbuf0.txbuf_start) % num_cpus;
+	//pr_info("ring_no: %d, num_cpus: %d\n", ring_no, num_cpus);
 
 	// txbuf to txring
-	tmp_txring_wr = txring[ring_no].write_ptr;
-	if ((tmp_txring_wr + len) > txring[ring_no].end_ptr) {
-		tmplen = txring[ring_no].end_ptr - tmp_txring_wr;
-		memcpy(tmp_txring_wr, pbuf0.txbuf_rd, tmplen);
-		memcpy(txring[ring_no].start_ptr, (pbuf0.txbuf_rd + tmplen), (len - tmplen));
-		tmp_txring_wr = txring[ring_no].start_ptr + (len - tmplen);
-	} else {
-		memcpy(tmp_txring_wr, pbuf0.txbuf_rd, len);
-	 	tmp_txring_wr+= len;
-	}
-	pbuf0.txbuf_rd += len;
+	if (pktdev_get_txring_free_space(ring_no) > 524288) {
+		tmp_txring_wr = txring[ring_no].write_ptr;
+		if ((tmp_txring_wr + len) > txring[ring_no].end_ptr) {
+			tmplen = txring[ring_no].end_ptr - tmp_txring_wr;
+			memcpy(tmp_txring_wr, pbuf0.txbuf_rd, tmplen);
+			memcpy(txring[ring_no].start_ptr, (pbuf0.txbuf_rd + tmplen), (len - tmplen));
+			tmp_txring_wr = txring[ring_no].start_ptr + (len - tmplen);
+		} else {
+			memcpy(tmp_txring_wr, pbuf0.txbuf_rd, len);
+			tmp_txring_wr+= len;
+		}
+		pbuf0.txbuf_rd += len;
 
-	// update ring write pointer with memory alignment
-	txring[ring_no].write_ptr =
-		(unsigned char *)((uintptr_t)tmp_txring_wr & 0xfffffffffffffffc);
+		// update ring write pointer with memory alignment
+		txring[ring_no].write_ptr =
+			(unsigned char *)((uintptr_t)tmp_txring_wr & 0xfffffffffffffffc);
+
+		if (waitqueue_active(&txring[ring_no].thq)) {
+			txring[ring_no].waiting = 0;
+			wake_up_interruptible(&txring[ring_no].thq);
+		}
+	}
 
 	if (count == (pbuf0.txbuf_rd - pbuf0.txbuf_start))
 		goto copy_end;
@@ -543,6 +542,9 @@ static int pktdev_create_txring(int cpu)
 	txring[cpu].write_ptr = txring[cpu].start_ptr;
 	txring[cpu].read_ptr  = txring[cpu].start_ptr;
 
+	init_waitqueue_head(&txring[cpu].thq);
+	txring[cpu].waiting = 1;
+
 	return 0;
 }
 
@@ -550,20 +552,20 @@ static int pktdev_thread_worker(void *arg)
 {
 	struct pktdev_thread *t = arg;
 	int cpu = t->cpu;
-	int i = 0;
+	//int i = 0;
 
 	complete(&t->start_done);
 
 	pr_info("starting pktdev/%d:  pid=%d\n", cpu, task_pid_nr(current));
 
 	while (!kthread_should_stop()) {
-		pr_info("[kthread] my cpu is %d (%d, HZ=%d)\n", cpu, i++, HZ);
+		//pr_info("[kthread] my cpu is %d (%d, HZ=%d)\n", cpu, i++, HZ);
+		set_current_state(TASK_INTERRUPTIBLE);
+		wait_event_interruptible_timeout(txring[cpu].thq,
+				txring[cpu].waiting == 0, HZ / 1000);
 
 		__set_current_state(TASK_RUNNING);
 		pktdev_tx_body(cpu);
-		//msleep_interruptible(1000); // a sec
-		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(HZ/10);
 	}
 
 	pr_info("kthread_exit: cpu=%d\n", cpu);
