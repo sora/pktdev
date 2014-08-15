@@ -64,8 +64,6 @@ struct _txring {
 	unsigned char *end_ptr;		/* tx buf end */
 	unsigned char *write_ptr;		/* tx write ptr */
 	unsigned char *read_ptr;		/* tx read ptr */
-	wait_queue_head_t thq;
-	int waiting;
 } static txring[MAX_CPUS];
 
 static unsigned int num_cpus;
@@ -157,7 +155,6 @@ lend:
 
 static int pktdev_open(struct inode *inode, struct file *filp)
 {
-
 	func_enter();
 
 	rtnl_lock();
@@ -350,7 +347,6 @@ tx_fail:
 
 tx_end:
 err:
-	txring[cpu].waiting = 1;
 	return;
 }
 
@@ -442,11 +438,6 @@ copy_to_ring:
 		// update ring write pointer with memory alignment
 		txring[ring_no].write_ptr =
 			(unsigned char *)((uintptr_t)tmp_txring_wr & 0xfffffffffffffffc);
-
-		if (waitqueue_active(&txring[ring_no].thq)) {
-			txring[ring_no].waiting = 0;
-			wake_up_interruptible(&txring[ring_no].thq);
-		}
 	}
 
 	if (count == (pbuf0.txbuf_rd - pbuf0.txbuf_start))
@@ -461,7 +452,6 @@ copy_end:
 
 static int pktdev_release(struct inode *inode, struct file *filp)
 {
-
 	func_enter();
 
 	rtnl_lock();
@@ -542,9 +532,6 @@ static int pktdev_create_txring(int cpu)
 	txring[cpu].write_ptr = txring[cpu].start_ptr;
 	txring[cpu].read_ptr  = txring[cpu].start_ptr;
 
-	init_waitqueue_head(&txring[cpu].thq);
-	txring[cpu].waiting = 1;
-
 	return 0;
 }
 
@@ -558,11 +545,20 @@ static int pktdev_thread_worker(void *arg)
 
 	pr_info("starting pktdev/%d:  pid=%d\n", cpu, task_pid_nr(current));
 
-	while (!kthread_should_stop()) {
+	set_current_state(TASK_INTERRUPTIBLE);
+
+	for (;;) {
 		//pr_info("[kthread] my cpu is %d (%d, HZ=%d)\n", cpu, i++, HZ);
+
 		set_current_state(TASK_INTERRUPTIBLE);
-		wait_event_interruptible_timeout(txring[cpu].thq,
-				txring[cpu].waiting == 0, HZ / 1000);
+
+		if (unlikely(kthread_should_stop()))
+			break;
+
+		if (txring[cpu].read_ptr == txring[cpu].write_ptr) {
+			schedule_timeout(HZ/100);
+			continue;
+		}
 
 		__set_current_state(TASK_RUNNING);
 		pktdev_tx_body(cpu);
