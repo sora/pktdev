@@ -234,7 +234,7 @@ static int pktdev_direct_xmit(struct sk_buff *skb, int cpu)
 
 	queue_map = skb_get_queue_mapping(skb);
 	txq = netdev_get_tx_queue(dev, queue_map);
-	printk( "queue_map=%d\n", (int)queue_map);
+	//printk( "queue_map=%d\n", (int)queue_map);
 
 	local_bh_disable();
 
