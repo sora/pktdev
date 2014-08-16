@@ -42,6 +42,7 @@
 #define PKT_RING_SZ (1024*1024*16)
 
 #define MAX_CPUS    (31)
+#define XMIT_BUDGET (0xFF)
 
 #define func_enter() pr_debug("entering %s\n", __func__);
 
@@ -80,7 +81,7 @@ struct _pbuf {
 	unsigned char *txbuf_rd;		/* tx read ptr */
 } static pbuf0 = {0,0,0,0,0,0,0,0};
 
-struct net_device* device = NULL;
+struct net_device *device = NULL;
 
 /* Module parameters, defaults. */
 static int debug = 0;
@@ -233,6 +234,7 @@ static int pktdev_direct_xmit(struct sk_buff *skb, int cpu)
 
 	queue_map = skb_get_queue_mapping(skb);
 	txq = netdev_get_tx_queue(dev, queue_map);
+	printk( "queue_map=%d\n", (int)queue_map);
 
 	local_bh_disable();
 
@@ -258,6 +260,11 @@ drop:
 	return NET_XMIT_DROP;
 }
 
+static u16 pktdev_pick_tx_queue(int cpu, struct net_device *dev)
+{
+	return (u16) cpu % dev->real_num_tx_queues;
+}
+
 /*
  * pktdev_tx_body():
  *
@@ -275,18 +282,21 @@ drop:
  */
 static void pktdev_tx_body(int cpu)
 {
-	int ret, tmplen;
+	int ret, tmplen, budget;
 	struct sk_buff *tx_skb = NULL;
 	unsigned short magic, frame_len;
-	unsigned char *tmp_txring_rd;
+	unsigned char *tmp_txring_rd, *txring_wr_snapshot;
 
 	func_enter();
 
-	//txring_wr_snapshot = txring[0].write_ptr;
+	txring_wr_snapshot = txring[cpu].write_ptr;
+	budget = XMIT_BUDGET;
 
 tx_loop:
 
-	if (txring[cpu].read_ptr == txring[cpu].write_ptr)
+	//if (txring[cpu].read_ptr == txring[cpu].write_ptr)
+	if ((txring[cpu].read_ptr == txring_wr_snapshot) ||
+			(--budget < 0))
 		goto tx_end;
 
 	tmp_txring_rd = txring[cpu].read_ptr;
@@ -315,6 +325,7 @@ tx_loop:
 	tx_skb = netdev_alloc_skb(device, frame_len);
 	if (likely(tx_skb)) {
 		tx_skb->dev = device;
+		tx_skb->queue_mapping = pktdev_pick_tx_queue(cpu, device);
 
 		// fill packet
 		skb_put(tx_skb, frame_len);
@@ -356,7 +367,7 @@ static int pktdev_get_hash(unsigned char *pkt_ptr)
 {
 	//u32 hash;
 
-	ii++;
+	ii = ii + 1;
 
 	return ii;
 }
@@ -550,18 +561,20 @@ static int pktdev_thread_worker(void *arg)
 	for (;;) {
 		//pr_info("[kthread] my cpu is %d (%d, HZ=%d)\n", cpu, i++, HZ);
 
-		set_current_state(TASK_INTERRUPTIBLE);
-
 		if (unlikely(kthread_should_stop()))
 			break;
 
 		if (txring[cpu].read_ptr == txring[cpu].write_ptr) {
-			schedule_timeout(HZ/100);
+			schedule_timeout(HZ/10);
 			continue;
 		}
 
 		__set_current_state(TASK_RUNNING);
 		pktdev_tx_body(cpu);
+//		if (need_resched())
+//			schedule();
+
+		set_current_state(TASK_INTERRUPTIBLE);
 	}
 
 	pr_info("kthread_exit: cpu=%d\n", cpu);
