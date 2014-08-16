@@ -39,10 +39,10 @@
 #define MAX_PKT_SZ  (9014)
 #define MIN_PKT_SZ  (60)
 #define PKT_BUF_SZ  (1024*1024*4)
-#define PKT_RING_SZ (1024*1024*16)
+#define PKT_RING_SZ (1024*1024*32)
 
 #define MAX_CPUS    (31)
-#define XMIT_BUDGET (0xFF)
+#define XMIT_BUDGET (0x200)
 
 #define func_enter() pr_debug("entering %s\n", __func__);
 
@@ -362,14 +362,17 @@ err:
 }
 
 /* simple hash generator */
-static unsigned int ii = 0;
+static unsigned int ii = 0, jj = 0;
 static int pktdev_get_hash(unsigned char *pkt_ptr)
 {
 	//u32 hash;
 
-	ii = ii + 1;
+	if (ii++ == 4096) {
+		ii = 0;
+		jj++;
+	}
 
-	return ii;
+	return jj % 4;
 }
 
 static ssize_t pktdev_write(struct file *filp, const char __user *buf,
@@ -429,7 +432,7 @@ copy_to_ring:
 	}
 
 	// txqueue selecter
-	ring_no = pktdev_get_hash(pbuf0.txbuf_start) % num_cpus;
+	ring_no = pktdev_get_hash(pbuf0.txbuf_start); //num_cpus;
 	//pr_info("ring_no: %d, num_cpus: %d\n", ring_no, num_cpus);
 
 	// txbuf to txring
@@ -558,21 +561,21 @@ static int pktdev_thread_worker(void *arg)
 
 	set_current_state(TASK_INTERRUPTIBLE);
 
-	for (;;) {
+	while (!kthread_should_stop()) {
 		//pr_info("[kthread] my cpu is %d (%d, HZ=%d)\n", cpu, i++, HZ);
 
-		if (unlikely(kthread_should_stop()))
-			break;
-
 		if (txring[cpu].read_ptr == txring[cpu].write_ptr) {
-			schedule_timeout(HZ/10);
+			schedule_timeout_interruptible(HZ/10);
 			continue;
 		}
 
 		__set_current_state(TASK_RUNNING);
+
 		pktdev_tx_body(cpu);
-//		if (need_resched())
-//			schedule();
+		if (need_resched())
+			schedule();
+		else
+			cpu_relax();
 
 		set_current_state(TASK_INTERRUPTIBLE);
 	}
