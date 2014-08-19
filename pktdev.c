@@ -79,7 +79,7 @@ struct pktdev_dev {
 	struct pktdev_buf txring[MAX_CPUS];
 
 	/* tx tmp buffer to store copy_from_user() data */
-	struct pktdev_buf txbuf;
+	struct pktdev_buf txbuf[MAX_CPUS];
 
 	/* rx ring buffer from dev_add_pack */
 	struct pktdev_buf rxbuf;
@@ -115,7 +115,6 @@ static int pktdev_pack_rcv(struct sk_buff *skb, struct net_device *dev,
 		struct packet_type *pt, struct net_device *dev2)
 {
 	unsigned short ethhdr_len, data_len;
-	struct pktdev_buf rxbuf = pdev->rxbuf;
 
 	func_enter();
 
@@ -134,20 +133,21 @@ static int pktdev_pack_rcv(struct sk_buff *skb, struct net_device *dev,
 	ethhdr_len = (unsigned short)skb->mac_len;
 	data_len = (unsigned short)skb->len;
 
-	if ((rxbuf.write_ptr + PKTDEV_HDR_SZ + ethhdr_len + data_len) > rxbuf.end_ptr) {
-		memcpy(rxbuf.start_ptr, rxbuf.read_ptr, (rxbuf.write_ptr - rxbuf.read_ptr ));
-		rxbuf.write_ptr -= (rxbuf.write_ptr - rxbuf.read_ptr);
-		rxbuf.read_ptr = rxbuf.start_ptr;
+	if ((pdev->rxbuf.write_ptr + PKTDEV_HDR_SZ + ethhdr_len + data_len) > pdev->rxbuf.end_ptr) {
+		memcpy(pdev->rxbuf.start_ptr, pdev->rxbuf.read_ptr,
+			(pdev->rxbuf.write_ptr - pdev->rxbuf.read_ptr ));
+		pdev->rxbuf.write_ptr -= (pdev->rxbuf.write_ptr - pdev->rxbuf.read_ptr);
+		pdev->rxbuf.read_ptr = pdev->rxbuf.start_ptr;
 	}
 
-	*(unsigned short *)rxbuf.write_ptr = PKTDEV_MAGIC;
-	rxbuf.write_ptr += 2;
-	*(unsigned short *)rxbuf.write_ptr = ethhdr_len + data_len;
-	rxbuf.write_ptr += 2;
-	memcpy(rxbuf.write_ptr, skb_mac_header(skb), (int)ethhdr_len);
-	rxbuf.write_ptr += ethhdr_len;
-	memcpy(rxbuf.write_ptr, skb->data, (int)data_len);
-	rxbuf.write_ptr += data_len;
+	*(unsigned short *)pdev->rxbuf.write_ptr = PKTDEV_MAGIC;
+	pdev->rxbuf.write_ptr += 2;
+	*(unsigned short *)pdev->rxbuf.write_ptr = ethhdr_len + data_len;
+	pdev->rxbuf.write_ptr += 2;
+	memcpy(pdev->rxbuf.write_ptr, skb_mac_header(skb), (int)ethhdr_len);
+	pdev->rxbuf.write_ptr += ethhdr_len;
+	memcpy(pdev->rxbuf.write_ptr, skb->data, (int)data_len);
+	pdev->rxbuf.write_ptr += data_len;
 
 	wake_up_interruptible(&pdev->read_q);
 
@@ -380,45 +380,48 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 	//int has_fragment_data = 0;
 	unsigned int len, tmplen; //, fragment_len;
 	unsigned short magic, frame_len;
+	int cpu;
 	//static unsigned char fragment[MAX_PKT_SZ];
 
 	func_enter();
+
+	cpu = smp_processor_id();
 
 	// for debug
 	if (unlikely((count >= PKT_BUF_SZ) || (count < MIN_PKT_SZ)))
 		return -ENOSPC;
 
-	pdev->txbuf.write_ptr = pdev->txbuf.start_ptr;
-	pdev->txbuf.read_ptr = pdev->txbuf.start_ptr;
+	pdev->txbuf[cpu].write_ptr = pdev->txbuf[cpu].start_ptr;
+	pdev->txbuf[cpu].read_ptr = pdev->txbuf[cpu].start_ptr;
 
 #if 0
 	// fragment data
 	if (has_fragment_data) {
-		memcpy(pdev->txbuf.write_ptr, fragment, fragment_len);
-		pdev->txbuf.write_ptr += fragment_len;
+		memcpy(pdev->txbuf[cpu].write_ptr, fragment, fragment_len);
+		pdev->txbuf[cpu].write_ptr += fragment_len;
 		has_fragment_data = 0;
 	}
 #endif
 
-	if (copy_from_user(pdev->txbuf.write_ptr, buf, count)) {
+	if (copy_from_user(pdev->txbuf[cpu].write_ptr, buf, count)) {
 		pr_info( "copy_from_user failed.\n" );
 		return -EFAULT;
 	}
 
-	while (likely(count != (pdev->txbuf.read_ptr - pdev->txbuf.start_ptr))) {
+	while (likely(count != (pdev->txbuf[cpu].read_ptr - pdev->txbuf[cpu].start_ptr))) {
 		struct pktdev_buf ring;
 		unsigned int ring_no;
 		unsigned char *dbug_rd, *dbug_wr;
 
 		// check magic code header
-		magic = *(unsigned short *)&pdev->txbuf.read_ptr[0];
+		magic = *(unsigned short *)&pdev->txbuf[cpu].read_ptr[0];
 		if (unlikely(magic != PKTDEV_MAGIC)) {
 			pr_info("[wr] data format error: magic code: %X\n", (int)magic);
 			return -EFAULT;
 		}
 
 		// check frame_len header
-		frame_len = *(unsigned short *)&pdev->txbuf.read_ptr[2];
+		frame_len = *(unsigned short *)&pdev->txbuf[cpu].read_ptr[2];
 		if (unlikely((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ))) {
 			pr_info("[wr] data size error: %X\n", (int)frame_len);
 			return -EFAULT;
@@ -428,16 +431,16 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 
 #if 0
 		// copy fragment data to tmp buf
-		fragment_len = count - (pdev->txbuf.read_ptr - pdev->txbuf.start_ptr);
+		fragment_len = count - (pdev->txbuf[cpu].read_ptr - pdev->txbuf[cpu].start_ptr);
 		if (len > fragment_len) {
 			has_fragment_data = 1;
-			memcpy(fragment, pdev->txbuf.read_ptr, fragment_len);
+			memcpy(fragment, pdev->txbuf[cpu].read_ptr, fragment_len);
 			goto copy_end;
 		}
 #endif
 
 		// txqueue selecter
-		ring_no = pktdev_get_hash(pdev->txbuf.start_ptr); //pdev->num_cpus;
+		ring_no = pktdev_get_hash(pdev->txbuf[cpu].start_ptr); //pdev->num_cpus;
 		ring = pdev->txring[ring_no];
 		//pr_info("Break: cpu=%d, rd=%p, wr=%p\n", ring_no,
 				//ring.read_ptr, ring.write_ptr);
@@ -447,24 +450,18 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 			// when overwriting
 			if (unlikely((ring.write_ptr + len) > ring.end_ptr)) {
 				tmplen = ring.end_ptr - ring.write_ptr;
-				memcpy(ring.write_ptr, pdev->txbuf.read_ptr, tmplen);
-				memcpy(ring.start_ptr, (pdev->txbuf.read_ptr + tmplen), (len - tmplen));
+				memcpy(ring.write_ptr, pdev->txbuf[cpu].read_ptr, tmplen);
+				memcpy(ring.start_ptr, (pdev->txbuf[cpu].read_ptr + tmplen), (len - tmplen));
 				ring.write_ptr = ring.start_ptr + (len - tmplen);
 			} else {
-				memcpy(ring.write_ptr, pdev->txbuf.read_ptr, len);
+				memcpy(ring.write_ptr, pdev->txbuf[cpu].read_ptr, len);
 				ring.write_ptr += len;
 			}
-			pdev->txbuf.read_ptr += len;
+			pdev->txbuf[cpu].read_ptr += len;
 
 			// update ring write pointer with memory alignment
 			pdev->txring[ring_no].write_ptr =
 				(unsigned char *)((uintptr_t)ring.write_ptr & 0xfffffffffffffffc);
-//			pr_info("ring%d.write_ptr: %p, wr_ptr: %p\n",
-//				ring_no, ring.write_ptr, wr_ptr);
-//			pr_info("Break: cpu=%d, rd=%p, wr=%p\n", ring_no,
-//					pdev->txring[ring_no].read_ptr, pdev->txring[ring_no].write_ptr);
-//			pr_info("Break: cpu=%d, ring_rd=%p, tmp_wr=%p\n", ring_no,
-//					ring.read_ptr, wr_ptr);
 		} else {
 			// return when a ring buffer reached the max size
 			dbug_rd = ring.read_ptr;
@@ -476,7 +473,7 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 	}
 
 //copy_end:
-	return (pdev->txbuf.read_ptr - pdev->txbuf.start_ptr);
+	return (pdev->txbuf[cpu].read_ptr - pdev->txbuf[cpu].start_ptr);
 }
 
 static int pktdev_release(struct inode *inode, struct file *filp)
@@ -697,18 +694,24 @@ static int __init pktdev_init(void)
 		ret = -1;
 		goto error;
 	}
-	pdev->rxbuf.end_ptr   = (pdev->rxbuf.start_ptr + PKT_RING_SZ - 1);
+	pdev->rxbuf.end_ptr   = pdev->rxbuf.start_ptr + PKT_RING_SZ - 1;
 	pdev->rxbuf.write_ptr = pdev->rxbuf.start_ptr;
 	pdev->rxbuf.read_ptr  = pdev->rxbuf.start_ptr;
 
+
+
 	/* Set transmitte buffer */
-	if ((pdev->txbuf.start_ptr = kmalloc(PKT_BUF_SZ, GFP_KERNEL)) == 0) {
-		pr_info("fail to kmalloc\n");
-		ret = -1;
-		goto error;
+	for (i = 0; i < pdev->num_cpus; i++) {
+		if ((pdev->txbuf[i].start_ptr = kmalloc(PKT_BUF_SZ, GFP_KERNEL)) == 0) {
+			pr_info("fail to kmalloc\n");
+			ret = -1;
+			goto error;
+		}
+		pdev->txbuf[i].end_ptr   = pdev->txbuf[i].start_ptr + PKT_BUF_SZ - 1;
+		pdev->txbuf[i].write_ptr = pdev->txbuf[i].start_ptr;
+		pdev->txbuf[i].read_ptr  = pdev->txbuf[i].start_ptr;
 	}
-	pdev->txbuf.write_ptr = pdev->txbuf.start_ptr;
-	pdev->txbuf.read_ptr  = pdev->txbuf.start_ptr;
+
 
 	/* register character device */
 	sprintf(name, "%s/%s", DRV_NAME, interface);
@@ -735,9 +738,11 @@ error:
 		pdev->rxbuf.start_ptr = NULL;
 	}
 
-	if (pdev->txbuf.start_ptr) {
-		kfree(pdev->txbuf.start_ptr);
-		pdev->txbuf.start_ptr = NULL;
+	for (i = 0; i < pdev->num_cpus; i++) {
+		if (pdev->txbuf[i].start_ptr) {
+			kfree(pdev->txbuf[i].start_ptr);
+			pdev->txbuf[i].start_ptr = NULL;
+		}
 	}
 
 	list_for_each_entry(t, &pdev->pktdev_threads.list, list) {
@@ -766,6 +771,7 @@ error:
 static void __exit pktdev_cleanup(void)
 {
 	struct pktdev_thread *t, *n;
+	int i;
 
 	func_enter();
 
@@ -780,9 +786,11 @@ static void __exit pktdev_cleanup(void)
 		pdev->rxbuf.start_ptr = NULL;
 	}
 
-	if (pdev->txbuf.start_ptr) {
-		kfree(pdev->txbuf.start_ptr);
-		pdev->txbuf.start_ptr = NULL;
+	for (i = 0; i < pdev->num_cpus; i++) {
+		if (pdev->txbuf[i].start_ptr) {
+			kfree(pdev->txbuf[i].start_ptr);
+			pdev->txbuf[i].start_ptr = NULL;
+		}
 	}
 
 	list_for_each_entry(t, &pdev->pktdev_threads.list, list) {
