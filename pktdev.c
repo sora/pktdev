@@ -33,60 +33,58 @@
 #define VERSION  "0.0.0"
 #define DRV_NAME "pkt"
 
-#define PKTDEV_MAGIC      (0x3776)
-#define PKTDEV_BIN_HDR_SZ (4)
+#define PKTDEV_MAGIC       (0x3776)
+#define PKTDEV_HDR_SZ      (4)
 
-#define MAX_PKT_SZ  (9014)
-#define MIN_PKT_SZ  (60)
-#define PKT_BUF_SZ  (1024*1024*4)
-#define PKT_RING_SZ (1024*1024*32)
-#define RING_THRESHOLD (PKT_RING_SZ >> 6)
+#define MAX_PKT_SZ         (9014)
+#define MIN_PKT_SZ         (60)
+#define PKT_BUF_SZ         (1024*1024*4)
+#define PKT_RING_SZ        (1024*1024*32)
+#define RING_THRESHOLD     (MAX_PKT_SZ*2)
 
-#define MAX_CPUS    (31)
-#define XMIT_BUDGET (0xFF)
+#define MAX_CPUS           (31)
+#define XMIT_BUDGET        (0xFF)
 
 #define func_enter() pr_debug("entering %s\n", __func__);
 
-static struct semaphore pktdev_sem;
-static wait_queue_head_t write_q;
-static wait_queue_head_t read_q;
-
 struct pktdev_thread {
-	unsigned int cpu;
-	struct task_struct *tsk;
-	unsigned char *ring_ptr;
-	struct list_head list;
+	unsigned int cpu;			/* cpu id that the thread is runnig */
+	struct task_struct *tsk;		/* xmit kthread */
 	struct completion start_done;
+	struct list_head list;
 };
-static struct pktdev_thread pktdev_threads;
 
-struct _txring {
-	unsigned int  cpu;		/* cpu id */
-	unsigned char *start_ptr;		/* tx buf start */
-	unsigned char *end_ptr;		/* tx buf end */
-	unsigned char *write_ptr;		/* tx write ptr */
-	unsigned char *read_ptr;		/* tx read ptr */
-} static txring[MAX_CPUS];
+struct pktdev_buf {
+	unsigned char *start_ptr;		/* buf start */
+	unsigned char *end_ptr;			/* buf end */
+	unsigned char *write_ptr;		/* write ptr */
+	unsigned char *read_ptr;		/* read ptr */
+};
 
-static unsigned int num_cpus;
+struct pktdev_dev {
+	/* target NIC port */
+	struct net_device *device;
 
-/* receive and transmitte buffer */
-struct _pbuf {
-	unsigned char *rx_start_ptr;		/* rx buf start */
-	unsigned char *rx_end_ptr;		/* rx buf end */
-	unsigned char *rx_write_ptr;		/* rx write ptr */
-	unsigned char *rx_read_ptr;		/* rx read ptr */
-	unsigned char *txbuf_start;		/* tx buf start */
-	unsigned char *txbuf_end;		/* tx buf end */
-	unsigned char *txbuf_wr;		/* tx write ptr */
-	unsigned char *txbuf_rd;		/* tx read ptr */
-} static pbuf0 = {0,0,0,0,0,0,0,0};
+	/* number of online cpu at load module */
+	unsigned int num_cpus;
 
-struct net_device *device = NULL;
+	/* RX wait queue */
+	wait_queue_head_t read_q;
+	struct semaphore pktdev_sem;
 
-/* Module parameters, defaults. */
-static int debug = 0;
-static char *interface = "p2p1";
+	/* tx threads for build_skb and xmit */
+	struct pktdev_thread pktdev_threads;
+
+	/* tx ring buffers. :todo rm MAX_CPUS */
+	struct pktdev_buf txring[MAX_CPUS];
+
+	/* tx tmp buffer to store copy_from_user() data */
+	struct pktdev_buf txbuf;
+
+	/* rx ring buffer from dev_add_pack */
+	struct pktdev_buf rxbuf;
+};
+
 
 static int pktdev_pack_rcv(struct sk_buff *skb, struct net_device *dev,
 				struct packet_type *pt, struct net_device *dev2);
@@ -100,13 +98,24 @@ static int pktdev_release(struct inode *inode, struct file *filp);
 static unsigned int pktdev_poll( struct file* filp, poll_table* wait );
 static long pktdev_ioctl(struct file *filp,
 				unsigned int cmd, unsigned long arg);
-static int pktdev_get_txring_free_space(int cpu);
+static int pktdev_get_ring_free_space(struct pktdev_buf);
+
+
+/* Module parameters, defaults. */
+static int debug = 0;
+static char *interface = "p2p1";
+static int xmit_cpus = 4;   // :todo
+
+
+/* Global variables */
+static struct pktdev_dev *pdev;
 
 
 static int pktdev_pack_rcv(struct sk_buff *skb, struct net_device *dev,
 		struct packet_type *pt, struct net_device *dev2)
 {
 	unsigned short ethhdr_len, data_len;
+	struct pktdev_buf rxbuf = pdev->rxbuf;
 
 	func_enter();
 
@@ -117,7 +126,7 @@ static int pktdev_pack_rcv(struct sk_buff *skb, struct net_device *dev,
 		pr_info("Test protocol: Packet Received with length: %u\n", skb->len+18);
 	}
 
-	if (down_interruptible(&pktdev_sem)) {
+	if (down_interruptible(&pdev->pktdev_sem)) {
 		pr_info("down_interruptible for read failed\n");
 		return -ERESTARTSYS;
 	}
@@ -125,26 +134,24 @@ static int pktdev_pack_rcv(struct sk_buff *skb, struct net_device *dev,
 	ethhdr_len = (unsigned short)skb->mac_len;
 	data_len = (unsigned short)skb->len;
 
-	if ((pbuf0.rx_write_ptr + PKTDEV_BIN_HDR_SZ + ethhdr_len + data_len) >
-		 pbuf0.rx_end_ptr) {
-		memcpy(pbuf0.rx_start_ptr, pbuf0.rx_read_ptr,
-			(pbuf0.rx_write_ptr - pbuf0.rx_read_ptr ));
-		pbuf0.rx_write_ptr -= (pbuf0.rx_write_ptr - pbuf0.rx_read_ptr);
-		pbuf0.rx_read_ptr = pbuf0.rx_start_ptr;
+	if ((rxbuf.write_ptr + PKTDEV_HDR_SZ + ethhdr_len + data_len) > rxbuf.end_ptr) {
+		memcpy(rxbuf.start_ptr, rxbuf.read_ptr, (rxbuf.write_ptr - rxbuf.read_ptr ));
+		rxbuf.write_ptr -= (rxbuf.write_ptr - rxbuf.read_ptr);
+		rxbuf.read_ptr = rxbuf.start_ptr;
 	}
 
-	*(unsigned short *)pbuf0.rx_write_ptr = PKTDEV_MAGIC;
-	pbuf0.rx_write_ptr += 2;
-	*(unsigned short *)pbuf0.rx_write_ptr = ethhdr_len + data_len;
-	pbuf0.rx_write_ptr += 2;
-	memcpy(pbuf0.rx_write_ptr, skb_mac_header(skb), (int)ethhdr_len);
-	pbuf0.rx_write_ptr += ethhdr_len;
-	memcpy(pbuf0.rx_write_ptr, skb->data, (int)data_len);
-	pbuf0.rx_write_ptr += data_len;
+	*(unsigned short *)rxbuf.write_ptr = PKTDEV_MAGIC;
+	rxbuf.write_ptr += 2;
+	*(unsigned short *)rxbuf.write_ptr = ethhdr_len + data_len;
+	rxbuf.write_ptr += 2;
+	memcpy(rxbuf.write_ptr, skb_mac_header(skb), (int)ethhdr_len);
+	rxbuf.write_ptr += ethhdr_len;
+	memcpy(rxbuf.write_ptr, skb->data, (int)data_len);
+	rxbuf.write_ptr += data_len;
 
-	wake_up_interruptible(&read_q);
+	wake_up_interruptible(&pdev->read_q);
 
-	up(&pktdev_sem);
+	up(&pdev->pktdev_sem);
 
 lend:
 	/* Don't mangle buffer if shared */
@@ -160,28 +167,28 @@ static int pktdev_open(struct inode *inode, struct file *filp)
 	func_enter();
 
 	rtnl_lock();
-	dev_set_promiscuity(device, 1);
+	dev_set_promiscuity(pdev->device, 1);
 	rtnl_unlock();
 
 	if (debug) {
 		pr_info("entering %s\n", __func__);
 		pr_info("[op] block: max: %d, start: %p, end: %p, txring_free %d, txring_rd: %p, txring_wr: %p\n",
-			(int)PKT_BUF_SZ, txring[0].start_ptr, txring[0].end_ptr,
-			pktdev_get_txring_free_space(0),
-			txring[0].read_ptr, txring[0].write_ptr);
+			(int)PKT_BUF_SZ, pdev->txring[0].start_ptr, pdev->txring[0].end_ptr,
+			pktdev_get_ring_free_space(pdev->txring[0]),
+			pdev->txring[0].read_ptr, pdev->txring[0].write_ptr);
 	}
 
 	return 0;
 }
 
-static inline int pktdev_get_txring_free_space(int cpu)
+static inline int pktdev_get_ring_free_space(struct pktdev_buf ring)
 {
 	unsigned int space;
 
-	if (txring[cpu].read_ptr > txring[cpu].write_ptr)
-		space = txring[cpu].read_ptr - txring[cpu].write_ptr;
+	if (ring.read_ptr > ring.write_ptr)
+		space = ring.read_ptr - ring.write_ptr;
 	else
-		space = PKT_BUF_SZ - (txring[cpu].write_ptr - txring[cpu].read_ptr);
+		space = PKT_RING_SZ - (ring.write_ptr - ring.read_ptr);
 
 	return space;
 }
@@ -193,23 +200,23 @@ static ssize_t pktdev_read(struct file *filp, char __user *buf,
 
 	func_enter();
 
-	if (wait_event_interruptible(read_q,
-		(pbuf0.rx_read_ptr != pbuf0.rx_write_ptr)))
+	if (wait_event_interruptible(pdev->read_q,
+		(pdev->rxbuf.read_ptr != pdev->rxbuf.write_ptr)))
 		return -ERESTARTSYS;
 
-	available_read_len = (pbuf0.rx_write_ptr - pbuf0.rx_read_ptr);
+	available_read_len = (pdev->rxbuf.write_ptr - pdev->rxbuf.read_ptr);
 
 	if (count > available_read_len)
 		copy_len = available_read_len;
 	else
 		copy_len = count;
 
-	if (copy_to_user(buf, pbuf0.rx_read_ptr, copy_len)) {
+	if (copy_to_user(buf, pdev->rxbuf.read_ptr, copy_len)) {
 		pr_info("copy_to_user failed\n");
 		return -EFAULT;
 	}
 
-	pbuf0.rx_read_ptr += copy_len;
+	pdev->rxbuf.read_ptr += copy_len;
 
 	return copy_len;
 }
@@ -286,54 +293,53 @@ static void pktdev_tx_body(int cpu)
 	int ret, tmplen, budget;
 	struct sk_buff *tx_skb = NULL;
 	unsigned short magic, frame_len;
-	unsigned char *tmp_txring_rd, *txring_wr_snapshot;
+	struct pktdev_buf ring;
 
-	txring_wr_snapshot = txring[cpu].write_ptr;
 	budget = XMIT_BUDGET;
+	ring = pdev->txring[cpu];
 
 tx_loop:
 
-	//if (txring[cpu].read_ptr == txring[cpu].write_ptr)
-	if ((txring[cpu].read_ptr == txring_wr_snapshot) ||
-			(--budget < 0))
+	if ((pdev->txring[cpu].read_ptr == pdev->txring[cpu].write_ptr)
+		|| (--budget < 0))
 		goto tx_end;
 
-	tmp_txring_rd = txring[cpu].read_ptr;
+	ring.read_ptr = pdev->txring[cpu].read_ptr;
 
 	// check magic code header
-	magic = *(unsigned short *)&tmp_txring_rd[0];
+	magic = *(unsigned short *)&ring.read_ptr[0];
 	if (unlikely(magic != PKTDEV_MAGIC)) {
 		pr_info("[cpu%d] format error: magic code %X, rd %p, wr %p\n",
-		cpu, (int)magic, tmp_txring_rd, txring[cpu].write_ptr);
+		cpu, (int)magic, ring.read_ptr, pdev->txring[cpu].write_ptr);
 		goto err;
 	}
 
 	// check frame_len header
-	frame_len = *(unsigned short *)&tmp_txring_rd[2];
+	frame_len = *(unsigned short *)&ring.read_ptr[2];
 	if (unlikely((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ))) {
 		pr_info("[cpu%d] data size error: %X, rd %p, wr %p\n",
-			cpu, (int)frame_len, tmp_txring_rd, txring[cpu].write_ptr);
+			cpu, (int)frame_len, ring.read_ptr, pdev->txring[cpu].write_ptr);
 		goto err;
 	}
 
-	tmp_txring_rd += 4;
-	if (tmp_txring_rd > txring[cpu].end_ptr)
-		tmp_txring_rd -= (txring[cpu].end_ptr - txring[cpu].start_ptr);
+	ring.read_ptr += PKTDEV_HDR_SZ;
+	if (ring.read_ptr > ring.end_ptr)
+		ring.read_ptr -= (ring.end_ptr - ring.start_ptr);
 
 	// alloc skb
-	tx_skb = netdev_alloc_skb(device, frame_len);
+	tx_skb = netdev_alloc_skb(pdev->device, frame_len);
 	if (likely(tx_skb)) {
-		tx_skb->dev = device;
-		tx_skb->queue_mapping = pktdev_pick_tx_queue(cpu, device);
+		tx_skb->dev = pdev->device;
+		tx_skb->queue_mapping = pktdev_pick_tx_queue(cpu, pdev->device);
 
 		// fill packet
 		skb_put(tx_skb, frame_len);
-		if ((tmp_txring_rd + frame_len) > txring[cpu].end_ptr) {
-			tmplen = txring[cpu].end_ptr - tmp_txring_rd;
-			memcpy(tx_skb->data, tmp_txring_rd, tmplen);
-			memcpy(tx_skb->data + tmplen, txring[cpu].start_ptr, (frame_len - tmplen));
+		if ((ring.read_ptr + frame_len) > ring.end_ptr) {
+			tmplen = ring.end_ptr - ring.read_ptr;
+			memcpy(tx_skb->data, ring.read_ptr, tmplen);
+			memcpy(tx_skb->data + tmplen, ring.start_ptr, (frame_len - tmplen));
 		} else {
-			memcpy(tx_skb->data, tmp_txring_rd, frame_len);
+			memcpy(tx_skb->data, ring.read_ptr, frame_len);
 		}
 
 		// sending
@@ -345,11 +351,12 @@ tx_loop:
 			}
 		}
 
-		tmp_txring_rd += frame_len;
-		if (tmp_txring_rd > txring[cpu].end_ptr)
-			tmp_txring_rd -= (txring[cpu].end_ptr - txring[cpu].start_ptr);
-		txring[cpu].read_ptr =
-			(unsigned char *)((uintptr_t)tmp_txring_rd & 0xfffffffffffffffc);
+		ring.read_ptr += frame_len;
+		if (ring.read_ptr > ring.end_ptr)
+			ring.read_ptr -= (ring.end_ptr - ring.start_ptr);
+
+		pdev->txring[cpu].read_ptr =
+			(unsigned char *)((uintptr_t)ring.read_ptr & 0xfffffffffffffffc);
 	}
 
 tx_fail:
@@ -360,11 +367,11 @@ err:
 	return;
 }
 
-/* simple hash generator */
+/* simple hash generator :todo */
 static unsigned int ii = 0;
 static inline int pktdev_get_hash(unsigned char *pkt_ptr)
 {
-	return (ii++ >> 12) & 3;
+	return ii++ % 8;
 }
 
 static ssize_t pktdev_write(struct file *filp, const char __user *buf,
@@ -374,8 +381,6 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 	unsigned int len, tmplen; //, fragment_len;
 	unsigned short magic, frame_len;
 	//static unsigned char fragment[MAX_PKT_SZ];
-	unsigned char *tmp_txring_wr;
-	unsigned int ring_no;
 
 	func_enter();
 
@@ -383,75 +388,95 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 	if (unlikely((count >= PKT_BUF_SZ) || (count < MIN_PKT_SZ)))
 		return -ENOSPC;
 
-	pbuf0.txbuf_wr = pbuf0.txbuf_start;
-	pbuf0.txbuf_rd = pbuf0.txbuf_start;
+	pdev->txbuf.write_ptr = pdev->txbuf.start_ptr;
+	pdev->txbuf.read_ptr = pdev->txbuf.start_ptr;
 
 #if 0
 	// fragment data
 	if (has_fragment_data) {
-		memcpy(pbuf0.txbuf_wr, fragment, fragment_len);
-		pbuf0.txbuf_wr += fragment_len;
+		memcpy(pdev->txbuf.write_ptr, fragment, fragment_len);
+		pdev->txbuf.write_ptr += fragment_len;
 		has_fragment_data = 0;
 	}
 #endif
 
-	if (copy_from_user(pbuf0.txbuf_wr, buf, count)) {
+	if (copy_from_user(pdev->txbuf.write_ptr, buf, count)) {
 		pr_info( "copy_from_user failed.\n" );
 		return -EFAULT;
 	}
 
-	while (likely(count != (pbuf0.txbuf_rd - pbuf0.txbuf_start))) {
+	while (likely(count != (pdev->txbuf.read_ptr - pdev->txbuf.start_ptr))) {
+		struct pktdev_buf ring;
+		unsigned int ring_no;
+		unsigned char *dbug_rd, *dbug_wr;
 
 		// check magic code header
-		magic = *(unsigned short *)&pbuf0.txbuf_rd[0];
+		magic = *(unsigned short *)&pdev->txbuf.read_ptr[0];
 		if (unlikely(magic != PKTDEV_MAGIC)) {
 			pr_info("[wr] data format error: magic code: %X\n", (int)magic);
 			return -EFAULT;
 		}
 
 		// check frame_len header
-		frame_len = *(unsigned short *)&pbuf0.txbuf_rd[2];
+		frame_len = *(unsigned short *)&pdev->txbuf.read_ptr[2];
 		if (unlikely((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ))) {
 			pr_info("[wr] data size error: %X\n", (int)frame_len);
 			return -EFAULT;
 		}
 
-		len = PKTDEV_BIN_HDR_SZ + frame_len;
+		len = PKTDEV_HDR_SZ + frame_len;
 
 #if 0
 		// copy fragment data to tmp buf
-		fragment_len = count - (pbuf0.txbuf_rd - pbuf0.txbuf_start);
+		fragment_len = count - (pdev->txbuf.read_ptr - pdev->txbuf.start_ptr);
 		if (len > fragment_len) {
 			has_fragment_data = 1;
-			memcpy(fragment, pbuf0.txbuf_rd, fragment_len);
+			memcpy(fragment, pdev->txbuf.read_ptr, fragment_len);
 			goto copy_end;
 		}
 #endif
 
 		// txqueue selecter
-		ring_no = pktdev_get_hash(pbuf0.txbuf_start); //num_cpus;
+		ring_no = pktdev_get_hash(pdev->txbuf.start_ptr); //pdev->num_cpus;
+		ring = pdev->txring[ring_no];
+		//pr_info("Break: cpu=%d, rd=%p, wr=%p\n", ring_no,
+				//ring.read_ptr, ring.write_ptr);
 
 		// txbuf to txring
-		if (likely(pktdev_get_txring_free_space(ring_no) > RING_THRESHOLD)) {
-			tmp_txring_wr = txring[ring_no].write_ptr;
-			if (unlikely((tmp_txring_wr + len) > txring[ring_no].end_ptr)) {
-				tmplen = txring[ring_no].end_ptr - tmp_txring_wr;
-				memcpy(tmp_txring_wr, pbuf0.txbuf_rd, tmplen);
-				memcpy(txring[ring_no].start_ptr, (pbuf0.txbuf_rd + tmplen), (len - tmplen));
-				tmp_txring_wr = txring[ring_no].start_ptr + (len - tmplen);
+		if (likely(pktdev_get_ring_free_space(ring) > RING_THRESHOLD)) {
+			// when overwriting
+			if (unlikely((ring.write_ptr + len) > ring.end_ptr)) {
+				tmplen = ring.end_ptr - ring.write_ptr;
+				memcpy(ring.write_ptr, pdev->txbuf.read_ptr, tmplen);
+				memcpy(ring.start_ptr, (pdev->txbuf.read_ptr + tmplen), (len - tmplen));
+				ring.write_ptr = ring.start_ptr + (len - tmplen);
 			} else {
-				memcpy(tmp_txring_wr, pbuf0.txbuf_rd, len);
-				tmp_txring_wr+= len;
+				memcpy(ring.write_ptr, pdev->txbuf.read_ptr, len);
+				ring.write_ptr += len;
 			}
-			pbuf0.txbuf_rd += len;
+			pdev->txbuf.read_ptr += len;
 
 			// update ring write pointer with memory alignment
-			txring[ring_no].write_ptr =
-				(unsigned char *)((uintptr_t)tmp_txring_wr & 0xfffffffffffffffc);
-			}
+			pdev->txring[ring_no].write_ptr =
+				(unsigned char *)((uintptr_t)ring.write_ptr & 0xfffffffffffffffc);
+//			pr_info("ring%d.write_ptr: %p, wr_ptr: %p\n",
+//				ring_no, ring.write_ptr, wr_ptr);
+//			pr_info("Break: cpu=%d, rd=%p, wr=%p\n", ring_no,
+//					pdev->txring[ring_no].read_ptr, pdev->txring[ring_no].write_ptr);
+//			pr_info("Break: cpu=%d, ring_rd=%p, tmp_wr=%p\n", ring_no,
+//					ring.read_ptr, wr_ptr);
+		} else {
+			// return when a ring buffer reached the max size
+			dbug_rd = ring.read_ptr;
+			dbug_wr = ring.write_ptr;
+			pr_info("Break: cpu=%d, rd=%p, wr=%p\n", ring_no,
+					dbug_rd, dbug_wr);
+			break;
 		}
+	}
+
 //copy_end:
-	return count;
+	return (pdev->txbuf.read_ptr - pdev->txbuf.start_ptr);
 }
 
 static int pktdev_release(struct inode *inode, struct file *filp)
@@ -459,15 +484,15 @@ static int pktdev_release(struct inode *inode, struct file *filp)
 	func_enter();
 
 	rtnl_lock();
-	dev_set_promiscuity(device, -1);
+	dev_set_promiscuity(pdev->device, -1);
 	rtnl_unlock();
 
 	if (debug) {
 		pr_info("entering %s\n", __func__);
 		pr_info("[cl] block: max: %d, start: %p, end: %p, txring_free %d, txring_rd: %p, txring_wr: %p\n",
-				(int)PKT_BUF_SZ, txring[0].start_ptr, txring[0].end_ptr,
-				pktdev_get_txring_free_space(0),
-				txring[0].read_ptr, txring[0].write_ptr);
+				(int)PKT_BUF_SZ, pdev->txring[0].start_ptr, pdev->txring[0].end_ptr,
+				pktdev_get_ring_free_space(pdev->txring[0]),
+				pdev->txring[0].read_ptr, pdev->txring[0].write_ptr);
 	}
 
 	return 0;
@@ -479,10 +504,9 @@ static unsigned int pktdev_poll(struct file* filp, poll_table* wait)
 
 	func_enter();
 
-	poll_wait(filp, &read_q,  wait);
-//	poll_wait( filp, &write_q, wait );
+	poll_wait(filp, &pdev->read_q, wait);
 
-	if (pbuf0.rx_read_ptr != pbuf0.rx_write_ptr) {
+	if (pdev->rxbuf.read_ptr != pdev->rxbuf.write_ptr) {
 		retmask |= (POLLIN  | POLLRDNORM);
 	}
 
@@ -526,15 +550,14 @@ static struct packet_type pktdev_pack =
 /* malloc transmittion ring buffer */
 static int pktdev_create_txring(int cpu)
 {
-	if ((txring[cpu].start_ptr = vmalloc_node(PKT_RING_SZ,
+	if ((pdev->txring[cpu].start_ptr = vmalloc_node(PKT_RING_SZ,
 			cpu_to_node(cpu))) == 0) {
 		pr_info("fail to vmalloc: cpu=%d\n", cpu);
 		return -ENOMEM;
 	}
-	txring[cpu].cpu       = cpu;
-	txring[cpu].end_ptr   = (txring[cpu].start_ptr + PKT_RING_SZ - 1);
-	txring[cpu].write_ptr = txring[cpu].start_ptr;
-	txring[cpu].read_ptr  = txring[cpu].start_ptr;
+	pdev->txring[cpu].end_ptr   = (pdev->txring[cpu].start_ptr + PKT_RING_SZ - 1);
+	pdev->txring[cpu].write_ptr = pdev->txring[cpu].start_ptr;
+	pdev->txring[cpu].read_ptr  = pdev->txring[cpu].start_ptr;
 
 	return 0;
 }
@@ -554,8 +577,8 @@ static int pktdev_thread_worker(void *arg)
 	while (!kthread_should_stop()) {
 		//pr_info("[kthread] my cpu is %d (%d, HZ=%d)\n", cpu, i++, HZ);
 
-		if (txring[cpu].read_ptr == txring[cpu].write_ptr) {
-			schedule_timeout_interruptible(HZ/10);
+		if (pdev->txring[cpu].read_ptr == pdev->txring[cpu].write_ptr) {
+			schedule_timeout_interruptible(1);
 			continue;
 		}
 
@@ -587,8 +610,7 @@ static int pktdev_create_tx_thread(int cpu)
 		return -ENOMEM;
 	}
 	t->cpu = cpu;
-	t->ring_ptr = txring[cpu].start_ptr;
-	list_add_tail(&t->list, &pktdev_threads.list);
+	list_add_tail(&t->list, &pdev->pktdev_threads.list);
 
 	init_completion(&t->start_done);
 	p = kthread_create_on_node(pktdev_thread_worker,
@@ -612,21 +634,28 @@ static int pktdev_create_tx_thread(int cpu)
 
 static int __init pktdev_init(void)
 {
-	int ret, cpu, i = 0;
+	int ret, cpu, i;
 	static char name[16];
 	struct pktdev_thread *t, *n;
 
 	pr_info("%s\n", __func__);
 
-	device = dev_get_by_name(&init_net, interface);
-	if (!device) {
+	if ((pdev = kmalloc(sizeof(struct pktdev_dev), GFP_KERNEL)) == 0) {
+		pr_info("fail to kmalloc: *pdev\n");
+		ret = -1;
+		goto error;
+	}
+	pdev->device = dev_get_by_name(&init_net, interface);
+	if (!pdev->device) {
 		pr_warn("Could not find %s\n", interface);
 		ret = -1;
 		goto error;
 	}
 
-	// setup xmit buffers and threads
-	INIT_LIST_HEAD(&pktdev_threads.list);
+	// init xmit buffers and threads
+	INIT_LIST_HEAD(&pdev->pktdev_threads.list);
+
+	i = 0;
 	for_each_online_cpu(cpu) {
 		int err;
 
@@ -648,37 +677,38 @@ static int __init pktdev_init(void)
 			pr_info("cannot create thread for cpu %d (%d)\n", cpu, err);
 	}
 
-	list_for_each_entry(t, &pktdev_threads.list, list) {
-		pr_info("Dump list entries: t->cpu=%d\n", t->cpu);
+	if (debug) {
+		list_for_each_entry(t, &pdev->pktdev_threads.list, list) {
+			pr_info("Dump list entries: t->cpu=%d\n", t->cpu);
+		}
 	}
 
-	num_cpus = i;
-	if (i < 1 || i != num_online_cpus()) {
-		pr_info("[init] cpus are disabled: i=%d, num_online_cpus=%d\n",
-				i, num_online_cpus());
+	pdev->num_cpus = i;
+	if (pdev->num_cpus < 1 || pdev->num_cpus != num_online_cpus()) {
+		pr_info("[init] cpus are disabled: num_cpus=%d, num_online_cpus=%d\n",
+				pdev->num_cpus, num_online_cpus());
 		ret = -1;
 		goto error;
 	}
 
 	/* Set receive buffer */
-	if ((pbuf0.rx_start_ptr = vmalloc(PKT_RING_SZ)) == 0) {
+	if ((pdev->rxbuf.start_ptr = vmalloc(PKT_RING_SZ)) == 0) {
 		pr_info("fail to vmalloc\n");
 		ret = -1;
 		goto error;
 	}
-	pbuf0.rx_end_ptr = (pbuf0.rx_start_ptr + PKT_RING_SZ - 1);
-	pbuf0.rx_write_ptr = pbuf0.rx_start_ptr;
-	pbuf0.rx_read_ptr  = pbuf0.rx_start_ptr;
+	pdev->rxbuf.end_ptr   = (pdev->rxbuf.start_ptr + PKT_RING_SZ - 1);
+	pdev->rxbuf.write_ptr = pdev->rxbuf.start_ptr;
+	pdev->rxbuf.read_ptr  = pdev->rxbuf.start_ptr;
 
 	/* Set transmitte buffer */
-	if ((pbuf0.txbuf_start = kmalloc(PKT_BUF_SZ, GFP_KERNEL)) == 0) {
+	if ((pdev->txbuf.start_ptr = kmalloc(PKT_BUF_SZ, GFP_KERNEL)) == 0) {
 		pr_info("fail to kmalloc\n");
 		ret = -1;
 		goto error;
 	}
-	pbuf0.txbuf_end = (pbuf0.txbuf_start + PKT_BUF_SZ - 1);
-	pbuf0.txbuf_wr  = pbuf0.txbuf_start;
-	pbuf0.txbuf_rd  = pbuf0.txbuf_start;
+	pdev->txbuf.write_ptr = pdev->txbuf.start_ptr;
+	pdev->txbuf.read_ptr  = pdev->txbuf.start_ptr;
 
 	/* register character device */
 	sprintf(name, "%s/%s", DRV_NAME, interface);
@@ -689,11 +719,10 @@ static int __init pktdev_init(void)
 		goto error;
 	}
 
-	sema_init(&pktdev_sem, 1);
-	init_waitqueue_head(&read_q);
-	init_waitqueue_head(&write_q);
+	sema_init(&pdev->pktdev_sem, 1);
+	init_waitqueue_head(&pdev->read_q);
 
-	pktdev_pack.dev = device;
+	pktdev_pack.dev = pdev->device;
 	dev_add_pack(&pktdev_pack);
 
 	return 0;
@@ -701,30 +730,34 @@ static int __init pktdev_init(void)
 error:
 	pr_info("got error in pktdev_init()\n");
 
-	if (pbuf0.rx_start_ptr) {
-		vfree(pbuf0.rx_start_ptr);
-		pbuf0.rx_start_ptr = NULL;
+	if (pdev->rxbuf.start_ptr) {
+		vfree(pdev->rxbuf.start_ptr);
+		pdev->rxbuf.start_ptr = NULL;
 	}
 
-	if (pbuf0.txbuf_start) {
-		kfree(pbuf0.txbuf_start);
-		pbuf0.txbuf_start = NULL;
+	if (pdev->txbuf.start_ptr) {
+		kfree(pdev->txbuf.start_ptr);
+		pdev->txbuf.start_ptr = NULL;
 	}
 
-	list_for_each_entry(t, &pktdev_threads.list, list) {
+	list_for_each_entry(t, &pdev->pktdev_threads.list, list) {
 		pr_info("vfree on cpu%d\n", t->cpu);
-		if (txring[t->cpu].start_ptr) {
-			vfree(txring[t->cpu].start_ptr);
-			txring[t->cpu].start_ptr = NULL;
-			t->ring_ptr = NULL;
+		if (pdev->txring[t->cpu].start_ptr) {
+			vfree(pdev->txring[t->cpu].start_ptr);
+			pdev->txring[t->cpu].start_ptr = NULL;
 		}
 	}
 
 	/* kthread */
-	list_for_each_entry_safe(t, n, &pktdev_threads.list, list) {
+	list_for_each_entry_safe(t, n, &pdev->pktdev_threads.list, list) {
 		list_del(&t->list);
 		kthread_stop(t->tsk);
 		kfree(t);
+	}
+
+	if (pdev) {
+		kfree(pdev);
+		pdev = NULL;
 	}
 
 	return ret;
@@ -742,31 +775,35 @@ static void __exit pktdev_cleanup(void)
 	dev_remove_pack(&pktdev_pack);
 
 	/* buffers */
-	if (pbuf0.rx_start_ptr) {
-		vfree(pbuf0.rx_start_ptr);
-		pbuf0.rx_start_ptr = NULL;
+	if (pdev->rxbuf.start_ptr) {
+		vfree(pdev->rxbuf.start_ptr);
+		pdev->rxbuf.start_ptr = NULL;
 	}
 
-	if (pbuf0.txbuf_start) {
-		kfree(pbuf0.txbuf_start);
-		pbuf0.txbuf_start = NULL;
+	if (pdev->txbuf.start_ptr) {
+		kfree(pdev->txbuf.start_ptr);
+		pdev->txbuf.start_ptr = NULL;
 	}
 
-	list_for_each_entry(t, &pktdev_threads.list, list) {
-		if (txring[t->cpu].start_ptr) {
+	list_for_each_entry(t, &pdev->pktdev_threads.list, list) {
+		if (pdev->txring[t->cpu].start_ptr) {
 			pr_info("vfree on cpu%d\n", t->cpu);
-			vfree(txring[t->cpu].start_ptr);
-			txring[t->cpu].start_ptr = NULL;
-			t->ring_ptr = NULL;
+			vfree(pdev->txring[t->cpu].start_ptr);
+			pdev->txring[t->cpu].start_ptr = NULL;
 		}
 	}
 
 	/* kthread */
-	list_for_each_entry_safe(t, n, &pktdev_threads.list, list) {
+	list_for_each_entry_safe(t, n, &pdev->pktdev_threads.list, list) {
 		pr_info("there is pktdev_cleanup(): cpu=%d\n", t->cpu);
 		list_del(&t->list);
 		kthread_stop(t->tsk);
 		kfree(t);
+	}
+
+	if (pdev) {
+		kfree(pdev);
+		pdev = NULL;
 	}
 }
 
@@ -779,5 +816,7 @@ MODULE_LICENSE("GPL");
 MODULE_VERSION(VERSION);
 module_param(debug, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(debug, "Enable debug mode");
-module_param( interface , charp , S_IRUGO);
+module_param(interface, charp, S_IRUGO);
 MODULE_PARM_DESC(interface, "interface");
+module_param(xmit_cpus, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(xmit_cpus, "xmit_cpus");
