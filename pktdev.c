@@ -75,11 +75,11 @@ struct pktdev_dev {
 	/* tx threads for build_skb and xmit */
 	struct pktdev_thread pktdev_threads;
 
-	/* tx ring buffers. :todo rm MAX_CPUS */
-	struct pktdev_buf txring[MAX_CPUS];
+	/* tx ring buffers */
+	struct pktdev_buf *txring;
 
 	/* tx tmp buffer to store copy_from_user() data */
-	struct pktdev_buf txbuf[MAX_CPUS];
+	struct pktdev_buf *txbuf;
 
 	/* rx ring buffer from dev_add_pack */
 	struct pktdev_buf rxbuf;
@@ -544,21 +544,6 @@ static struct packet_type pktdev_pack =
 	NULL
 };
 
-/* malloc transmittion ring buffer */
-static int pktdev_create_txring(int cpu)
-{
-	if ((pdev->txring[cpu].start_ptr = vmalloc_node(PKT_RING_SZ,
-			cpu_to_node(cpu))) == 0) {
-		pr_info("fail to vmalloc: cpu=%d\n", cpu);
-		return -ENOMEM;
-	}
-	pdev->txring[cpu].end_ptr   = (pdev->txring[cpu].start_ptr + PKT_RING_SZ - 1);
-	pdev->txring[cpu].write_ptr = pdev->txring[cpu].start_ptr;
-	pdev->txring[cpu].read_ptr  = pdev->txring[cpu].start_ptr;
-
-	return 0;
-}
-
 static int pktdev_thread_worker(void *arg)
 {
 	struct pktdev_thread *t = arg;
@@ -623,9 +608,6 @@ static int pktdev_create_tx_thread(int cpu)
 	kthread_bind(p, cpu);
 	t->tsk = p;
 
-	wake_up_process(p);
-	wait_for_completion(&t->start_done);
-
 	return 0;
 }
 
@@ -652,41 +634,31 @@ static int __init pktdev_init(void)
 	// init xmit buffers and threads
 	INIT_LIST_HEAD(&pdev->pktdev_threads.list);
 
-	i = 0;
+	// count number of cpu and create cpu id list and kthreads
+	pdev->num_cpus = 0;
 	for_each_online_cpu(cpu) {
 		int err;
 
 		// for debug
-		if (cpu != i++) {
-			pr_info("[init] cpu != i: cpu=%d, i=%d\n", cpu, i);
+		if (cpu != pdev->num_cpus++) {
+			pr_info("[init] cpu != i: cpu=%d, num_cpus=%d\n", cpu, pdev->num_cpus);
 			ret = -1;
 			goto error;
 		}
 
-		// txring
-		err = pktdev_create_txring(cpu);
-		if (err)
-			pr_info("cannot create txring for cpu %d (%d)\n", cpu, err);
-
-		// tx thread
+		// create tx thread on each cpu
 		err = pktdev_create_tx_thread(cpu);
 		if (err)
 			pr_info("cannot create thread for cpu %d (%d)\n", cpu, err);
-	}
 
-	if (debug) {
-		list_for_each_entry(t, &pdev->pktdev_threads.list, list) {
-			pr_info("Dump list entries: t->cpu=%d\n", t->cpu);
-		}
 	}
-
-	pdev->num_cpus = i;
 	if (pdev->num_cpus < 1 || pdev->num_cpus != num_online_cpus()) {
 		pr_info("[init] cpus are disabled: num_cpus=%d, num_online_cpus=%d\n",
 				pdev->num_cpus, num_online_cpus());
 		ret = -1;
 		goto error;
 	}
+
 
 	/* Set receive buffer */
 	if ((pdev->rxbuf.start_ptr = vmalloc(PKT_RING_SZ)) == 0) {
@@ -698,18 +670,50 @@ static int __init pktdev_init(void)
 	pdev->rxbuf.write_ptr = pdev->rxbuf.start_ptr;
 	pdev->rxbuf.read_ptr  = pdev->rxbuf.start_ptr;
 
-
-
 	/* Set transmitte buffer */
-	for (i = 0; i < pdev->num_cpus; i++) {
-		if ((pdev->txbuf[i].start_ptr = kmalloc(PKT_BUF_SZ, GFP_KERNEL)) == 0) {
+	if ((pdev->txbuf = kmalloc((sizeof(struct pktdev_buf) * pdev->num_cpus),
+		GFP_KERNEL)) == 0) {
+		pr_info("fail to kmalloc\n");
+		ret = -1;
+		goto error;
+	}
+
+	/* Set tx ring buffer */
+	if ((pdev->txring = kmalloc((sizeof(struct pktdev_buf) * pdev->num_cpus),
+		GFP_KERNEL)) == 0) {
+		pr_info("fail to kmalloc\n");
+		ret = -1;
+		goto error;
+	}
+
+	/* malloc buffers on each numa memory */
+	list_for_each_entry(t, &pdev->pktdev_threads.list, list) {
+		cpu = t->cpu;
+
+		// txring
+		if ((pdev->txring[cpu].start_ptr = vmalloc_node(PKT_RING_SZ,
+				cpu_to_node(cpu))) == 0) {
+			pr_info("fail to vmalloc: cpu=%d\n", cpu);
+			return -ENOMEM;
+		}
+		pdev->txring[cpu].end_ptr   = pdev->txring[cpu].start_ptr + PKT_RING_SZ - 1;
+		pdev->txring[cpu].write_ptr = pdev->txring[cpu].start_ptr;
+		pdev->txring[cpu].read_ptr  = pdev->txring[cpu].start_ptr;
+
+		// txbuf
+		if ((pdev->txbuf[cpu].start_ptr = kmalloc_node(PKT_BUF_SZ, GFP_KERNEL,
+				cpu_to_node(cpu))) == 0) {
 			pr_info("fail to kmalloc\n");
 			ret = -1;
 			goto error;
 		}
-		pdev->txbuf[i].end_ptr   = pdev->txbuf[i].start_ptr + PKT_BUF_SZ - 1;
-		pdev->txbuf[i].write_ptr = pdev->txbuf[i].start_ptr;
-		pdev->txbuf[i].read_ptr  = pdev->txbuf[i].start_ptr;
+		pdev->txbuf[cpu].end_ptr   = pdev->txbuf[cpu].start_ptr + PKT_BUF_SZ - 1;
+		pdev->txbuf[cpu].write_ptr = pdev->txbuf[cpu].start_ptr;
+		pdev->txbuf[cpu].read_ptr  = pdev->txbuf[cpu].start_ptr;
+
+		/* wake up kthreds */
+		wake_up_process(t->tsk);
+		wait_for_completion(&t->start_done);
 	}
 
 
@@ -743,6 +747,10 @@ error:
 			kfree(pdev->txbuf[i].start_ptr);
 			pdev->txbuf[i].start_ptr = NULL;
 		}
+	}
+	if (pdev->txbuf) {
+		kfree(pdev->txbuf);
+		pdev->txbuf = NULL;
 	}
 
 	list_for_each_entry(t, &pdev->pktdev_threads.list, list) {
@@ -791,6 +799,10 @@ static void __exit pktdev_cleanup(void)
 			kfree(pdev->txbuf[i].start_ptr);
 			pdev->txbuf[i].start_ptr = NULL;
 		}
+	}
+	if (pdev->txbuf) {
+		kfree(pdev->txbuf);
+		pdev->txbuf = NULL;
 	}
 
 	list_for_each_entry(t, &pdev->pktdev_threads.list, list) {
