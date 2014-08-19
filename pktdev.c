@@ -99,6 +99,7 @@ static unsigned int pktdev_poll( struct file* filp, poll_table* wait );
 static long pktdev_ioctl(struct file *filp,
 				unsigned int cmd, unsigned long arg);
 static int pktdev_get_ring_free_space(struct pktdev_buf);
+static void pktdev_free(void);
 
 
 /* Module parameters, defaults. */
@@ -611,11 +612,55 @@ static int pktdev_create_tx_thread(int cpu)
 	return 0;
 }
 
+static void pktdev_free(void)
+{
+	struct pktdev_thread *t, *n;
+
+	/* free rx ring buffer */
+	if (pdev->rxbuf.start_ptr) {
+		vfree(pdev->rxbuf.start_ptr);
+		pdev->rxbuf.start_ptr = NULL;
+	}
+
+	/* free tx ring buffers */
+	list_for_each_entry_safe(t, n, &pdev->pktdev_threads.list, list) {
+		if (pdev->txbuf[t->cpu].start_ptr) {
+			kfree(pdev->txbuf[t->cpu].start_ptr);
+			pdev->txbuf[t->cpu].start_ptr = NULL;
+		}
+
+		if (pdev->txring[t->cpu].start_ptr) {
+			vfree(pdev->txring[t->cpu].start_ptr);
+			pdev->txring[t->cpu].start_ptr = NULL;
+		}
+
+		pr_info("there is pktdev_cleanup(): cpu=%d\n", t->cpu);
+		kthread_stop(t->tsk);
+		list_del(&t->list);
+		kfree(t);
+	}
+
+	if (pdev->txbuf) {
+		kfree(pdev->txbuf);
+		pdev->txbuf = NULL;
+	}
+
+	if (pdev->txring) {
+		kfree(pdev->txring);
+		pdev->txring = NULL;
+	}
+
+	if (pdev) {
+		kfree(pdev);
+		pdev = NULL;
+	}
+}
+
 static int __init pktdev_init(void)
 {
 	int ret, cpu;
 	static char name[16];
-	struct pktdev_thread *t, *n;
+	struct pktdev_thread *t;
 
 	pr_info("%s\n", __func__);
 
@@ -716,7 +761,6 @@ static int __init pktdev_init(void)
 		wait_for_completion(&t->start_done);
 	}
 
-
 	/* register character device */
 	sprintf(name, "%s/%s", DRV_NAME, interface);
 	pktdev_dev.name = name;
@@ -737,49 +781,13 @@ static int __init pktdev_init(void)
 error:
 	pr_info("got error in pktdev_init()\n");
 
-	if (pdev->rxbuf.start_ptr) {
-		vfree(pdev->rxbuf.start_ptr);
-		pdev->rxbuf.start_ptr = NULL;
-	}
-
-	list_for_each_entry_safe(t, n, &pdev->pktdev_threads.list, list) {
-		if (pdev->txbuf[t->cpu].start_ptr) {
-			kfree(pdev->txbuf[t->cpu].start_ptr);
-			pdev->txbuf[t->cpu].start_ptr = NULL;
-		}
-
-		if (pdev->txring[t->cpu].start_ptr) {
-			vfree(pdev->txring[t->cpu].start_ptr);
-			pdev->txring[t->cpu].start_ptr = NULL;
-		}
-
-		kthread_stop(t->tsk);
-		list_del(&t->list);
-		kfree(t);
-	}
-
-	if (pdev->txbuf) {
-		kfree(pdev->txbuf);
-		pdev->txbuf = NULL;
-	}
-
-	if (pdev->txring) {
-		kfree(pdev->txring);
-		pdev->txring = NULL;
-	}
-
-	if (pdev) {
-		kfree(pdev);
-		pdev = NULL;
-	}
+	pktdev_free();
 
 	return ret;
 }
 
 static void __exit pktdev_cleanup(void)
 {
-	struct pktdev_thread *t, *n;
-
 	func_enter();
 
 	misc_deregister(&pktdev_dev);
@@ -787,44 +795,7 @@ static void __exit pktdev_cleanup(void)
 	/* rx */
 	dev_remove_pack(&pktdev_pack);
 
-	/* free rx ring buffer */
-	if (pdev->rxbuf.start_ptr) {
-		vfree(pdev->rxbuf.start_ptr);
-		pdev->rxbuf.start_ptr = NULL;
-	}
-
-	/* free tx ring buffers */
-	list_for_each_entry_safe(t, n, &pdev->pktdev_threads.list, list) {
-		if (pdev->txbuf[t->cpu].start_ptr) {
-			kfree(pdev->txbuf[t->cpu].start_ptr);
-			pdev->txbuf[t->cpu].start_ptr = NULL;
-		}
-
-		if (pdev->txring[t->cpu].start_ptr) {
-			vfree(pdev->txring[t->cpu].start_ptr);
-			pdev->txring[t->cpu].start_ptr = NULL;
-		}
-
-		pr_info("there is pktdev_cleanup(): cpu=%d\n", t->cpu);
-		kthread_stop(t->tsk);
-		list_del(&t->list);
-		kfree(t);
-	}
-
-	if (pdev->txbuf) {
-		kfree(pdev->txbuf);
-		pdev->txbuf = NULL;
-	}
-
-	if (pdev->txring) {
-		kfree(pdev->txring);
-		pdev->txring = NULL;
-	}
-
-	if (pdev) {
-		kfree(pdev);
-		pdev = NULL;
-	}
+	pktdev_free();
 }
 
 module_init(pktdev_init);
