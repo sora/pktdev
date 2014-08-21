@@ -39,7 +39,6 @@
 #define MAX_PKT_SZ         (9014)
 #define MIN_PKT_SZ         (60)
 #define PKT_BUF_SZ         (1024*1024*4)
-#define PKT_RING_SZ        (1024*1024*32)
 #define RING_THRESHOLD     (MAX_PKT_SZ*2)
 
 #define MAX_CPUS           (31)
@@ -67,6 +66,9 @@ struct pktdev_dev {
 
 	/* number of online cpu at load module */
 	unsigned int num_cpus;
+
+	/* TX ring size on each xmit kthread */
+	int txring_size;
 
 	/* RX wait queue */
 	wait_queue_head_t read_q;
@@ -106,7 +108,7 @@ static void pktdev_free(void);
 static int debug = 0;
 static char *interface = "p2p1";
 static int xmit_cpus = 4;   // :todo
-
+static int txring_size = 32;
 
 /* Global variables */
 static struct pktdev_dev *pdev;
@@ -189,7 +191,7 @@ static inline int pktdev_get_ring_free_space(struct pktdev_buf ring)
 	if (ring.read_ptr > ring.write_ptr)
 		space = ring.read_ptr - ring.write_ptr;
 	else
-		space = PKT_RING_SZ - (ring.write_ptr - ring.read_ptr);
+		space = pdev->txring_size - (ring.write_ptr - ring.read_ptr);
 
 	return space;
 }
@@ -670,12 +672,17 @@ static int __init pktdev_init(void)
 		ret = -1;
 		goto error;
 	}
+
 	pdev->device = dev_get_by_name(&init_net, interface);
 	if (!pdev->device) {
 		pr_warn("Could not find %s\n", interface);
 		ret = -1;
 		goto error;
 	}
+
+	/* txring size from module parameter */
+	pdev->txring_size = txring_size * 1024 * 1024;
+	pr_info("pdev->txring_size: %d\n", pdev->txring_size);
 
 	// init xmit buffers and threads
 	INIT_LIST_HEAD(&pdev->pktdev_threads.list);
@@ -702,12 +709,12 @@ static int __init pktdev_init(void)
 	}
 
 	/* Set receive buffer */
-	if ((pdev->rxbuf.start_ptr = vmalloc(PKT_RING_SZ)) == 0) {
+	if ((pdev->rxbuf.start_ptr = vmalloc(pdev->txring_size)) == 0) {
 		pr_info("fail to vmalloc\n");
 		ret = -1;
 		goto error;
 	}
-	pdev->rxbuf.end_ptr   = pdev->rxbuf.start_ptr + PKT_RING_SZ - 1;
+	pdev->rxbuf.end_ptr   = pdev->rxbuf.start_ptr + pdev->txring_size - 1;
 	pdev->rxbuf.write_ptr = pdev->rxbuf.start_ptr;
 	pdev->rxbuf.read_ptr  = pdev->rxbuf.start_ptr;
 
@@ -734,12 +741,12 @@ static int __init pktdev_init(void)
 		cpu = t->cpu;
 
 		// txring
-		if ((pdev->txring[cpu].start_ptr = vmalloc_node(PKT_RING_SZ,
+		if ((pdev->txring[cpu].start_ptr = vmalloc_node(pdev->txring_size,
 				cpu_to_node(cpu))) == 0) {
 			pr_info("fail to vmalloc: cpu=%d\n", cpu);
 			return -ENOMEM;
 		}
-		pdev->txring[cpu].end_ptr   = pdev->txring[cpu].start_ptr + PKT_RING_SZ - 1;
+		pdev->txring[cpu].end_ptr   = pdev->txring[cpu].start_ptr + pdev->txring_size - 1;
 		pdev->txring[cpu].write_ptr = pdev->txring[cpu].start_ptr;
 		pdev->txring[cpu].read_ptr  = pdev->txring[cpu].start_ptr;
 
@@ -798,3 +805,5 @@ module_param(interface, charp, S_IRUGO);
 MODULE_PARM_DESC(interface, "interface");
 module_param(xmit_cpus, int, S_IRUGO);
 MODULE_PARM_DESC(xmit_cpus, "number of kthreads for xmit");
+module_param(txring_size, int, S_IRUGO);
+MODULE_PARM_DESC(txring_size, "TX ring size on each xmit kthread (MB)");
