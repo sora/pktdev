@@ -6,7 +6,7 @@ pktdev
 $ git clone git@github.com:sora/pktdev.git
 $ cd pktdev
 $ make
-$ sudo insmod ./pktdev.ko  interface="p2p1" xmit_cpus="4" txring_size="128"
+$ sudo insmod ./pktdev.ko  interface="p2p1" tx_cpus="4" txring_size="128"
 $ sudo chmod 777 /dev/pkt/p2p1
 $ (cd exp; make)
 $ exp/wr-64b-595pkt /dev/pkt/p2p1

@@ -107,7 +107,7 @@ static void pktdev_free(void);
 /* Module parameters, defaults. */
 static int debug = 0;
 static char *interface = "p2p1";
-static int xmit_cpus = 4;   // :todo
+static int tx_cpus = 4;   // :todo
 static int txring_size = 32;
 
 /* Global variables */
@@ -373,7 +373,7 @@ err:
 static unsigned int ii = 0;
 static inline int pktdev_get_hash(unsigned char *pkt_ptr)
 {
-	return (ii++ % xmit_cpus);
+	return (ii++ % tx_cpus);
 }
 
 static ssize_t pktdev_write(struct file *filp, const char __user *buf,
@@ -661,8 +661,8 @@ static int __init pktdev_init(void)
 
 	pr_info("%s\n", __func__);
 
-	if (xmit_cpus > nr_cpu_ids) {
-		pr_info("xmit_cpus:%d > nr_cpu_ids:%d\n", xmit_cpus, nr_cpu_ids);
+	if (tx_cpus > nr_cpu_ids) {
+		pr_info("tx_cpus:%d > nr_cpu_ids:%d\n", tx_cpus, nr_cpu_ids);
 		ret = -1;
 		goto error;
 	}
@@ -704,7 +704,7 @@ static int __init pktdev_init(void)
 		if (err)
 			pr_info("cannot create thread for cpu %d (%d)\n", cpu, err);
 
-		if (pdev->num_cpus == xmit_cpus)
+		if (pdev->num_cpus == tx_cpus)
 			break;
 	}
 
@@ -803,7 +803,7 @@ module_param(debug, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(debug, "Enable debug mode");
 module_param(interface, charp, S_IRUGO);
 MODULE_PARM_DESC(interface, "interface");
-module_param(xmit_cpus, int, S_IRUGO);
-MODULE_PARM_DESC(xmit_cpus, "number of kthreads for xmit");
+module_param(tx_cpus, int, S_IRUGO);
+MODULE_PARM_DESC(tx_cpus, "number of kthreads for xmit");
 module_param(txring_size, int, S_IRUGO);
 MODULE_PARM_DESC(txring_size, "TX ring size on each xmit kthread (MB)");
