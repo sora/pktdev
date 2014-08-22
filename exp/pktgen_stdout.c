@@ -6,6 +6,11 @@
 #include <string.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
+#include <net/ethernet.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/udp.h>
+
 
 #define PKTGEN_MAGIC   (0xbe9be955)
 #define ETH_DST_MAC    (0x020000000002)
@@ -25,8 +30,6 @@
 
 #define PKTDEV_MAGIC   (0x3776)
 
-unsigned int id = 0;
-
 #if 0
 static const unsigned char pkt[] = {
   // magic code
@@ -45,120 +48,217 @@ static const unsigned char pkt[] = {
   0x00, 0x02, 0x43, 0xe2, 0x00, 0x00
 
 };
-static const unsigned short pktlen = sizeof(pkt) / sizeof(pkt[0]);
+static const u_int16_t pktlen = sizeof(pkt) / sizeof(pkt[0]);
 #endif
 
-struct packet {
+/* from netmap pkt-gen.c */
+
+static uint16_t checksum(const void * data, uint16_t len, uint32_t sum)
+{
+  const uint8_t *addr = data;
+  uint32_t i;
+
+  /* Checksum all the pairs of bytes first... */
+  for (i = 0; i < (len & ~1U); i += 2) {
+    sum += (u_int16_t)ntohs(*((u_int16_t *)(addr + i)));
+    if (sum > 0xFFFF)
+      sum -= 0xFFFF;
+  }
+
+  /*
+   * If there's a single byte left over, checksum it, too.
+   * Network byte order is big-endian, so the remaining byte is
+   * the high byte.
+   */
+  if (i < len) {
+    sum += addr[i] << 8;
+    if (sum > 0xFFFF)
+      sum -= 0xFFFF;
+  }
+
+  return sum;
+}
+
+static u_int16_t wrapsum(u_int32_t sum)
+{
+  sum = ~sum & 0xFFFF;
+  return (htons(sum));
+}
+
+
+/* pktdev header */
+struct pd_hdr {
   u_int16_t pd_magic;
   u_int16_t pd_frame_len;
-
-  u_int8_t  eth_dst_mac[6];
-  u_int8_t  eth_src_mac[6];
-  u_int16_t eth_type;
-
-  u_int16_t ip4_vers;
-  u_int16_t ip4_len;
-  u_int16_t ip4_id;
-  u_int16_t ip4_flags;
-  u_int8_t  ip4_ttl;
-  u_int8_t  ip4_protocol;
-  u_int16_t ip4_csum;
-  u_int32_t ip4_src_ip;
-  u_int32_t ip4_dst_ip;
-
-  u_int16_t udp_src;
-  u_int16_t udp_dst;
-  u_int16_t udp_len;
-  u_int16_t udp_csum;
-
-  u_int32_t pg_magic;
-  u_int32_t pg_seq_num;
-  u_int64_t pg_time;
-} __attribute__((packed));
-
-struct packet fill_packet(struct packet pkt, unsigned short frame_len)
-{
-  int ret;
-
-  pkt.pd_magic = htons(PKTDEV_MAGIC);
-  pkt.pd_frame_len = htons(frame_len);
-
-  pkt.eth_dst_mac[5] = (ETH_DST_MAC      ) & 0xFF;
-  pkt.eth_dst_mac[4] = (ETH_DST_MAC >>  8) & 0xFF;
-  pkt.eth_dst_mac[3] = (ETH_DST_MAC >> 16) & 0xFF;
-  pkt.eth_dst_mac[2] = (ETH_DST_MAC >> 24) & 0xFF;
-  pkt.eth_dst_mac[1] = (ETH_DST_MAC >> 32) & 0xFF;
-  pkt.eth_dst_mac[0] = (ETH_DST_MAC >> 40) & 0xFF;
-  pkt.eth_src_mac[5] = (ETH_SRC_MAC      ) & 0xFF;
-  pkt.eth_src_mac[4] = (ETH_SRC_MAC >>  8) & 0xFF;
-  pkt.eth_src_mac[3] = (ETH_SRC_MAC >> 16) & 0xFF;
-  pkt.eth_src_mac[2] = (ETH_SRC_MAC >> 24) & 0xFF;
-  pkt.eth_src_mac[1] = (ETH_SRC_MAC >> 32) & 0xFF;
-  pkt.eth_src_mac[0] = (ETH_SRC_MAC >> 40) & 0xFF;
-  pkt.eth_type = htons(0x0800);
-
-  pkt.ip4_vers = htons(0x4500);
-  pkt.ip4_len = htons(frame_len - ETH_HDR_LEN);
-  pkt.ip4_id = htons(1000 + id);
-  pkt.ip4_flags = 0;
-  pkt.ip4_ttl = IP4_TTL;
-  pkt.ip4_protocol = IP4_PROTO_UDP;
-  pkt.ip4_csum = 0;
-  ret = inet_pton(AF_INET, IP4_SRC_IP, &pkt.ip4_src_ip);
-  if (ret <= 0) {
-    fprintf(stderr, "ip4_src_ip: format error\n");
-    exit(EXIT_FAILURE);
-  }
-  ret = inet_pton(AF_INET, IP4_DST_IP, &pkt.ip4_dst_ip);
-  if (ret <= 0) {
-    fprintf(stderr, "ip4_src_ip: format error\n");
-    exit(EXIT_FAILURE);
-  }
-
-  pkt.udp_src = htons(UDP_SRC_PORT);
-  pkt.udp_dst = htons(UDP_DST_PORT);
-  pkt.udp_len = htons(frame_len - ETH_HDR_LEN - IP4_HDR_LEN);
-  pkt.udp_csum = 0;
-
-  pkt.pg_magic = htonl(PKTGEN_MAGIC);
-  pkt.pg_seq_num = htons(id++);
-  pkt.pg_time = 0;
-
-  return pkt;
 };
 
-// ./simple_pktgen frame_len nloop npkt
+/* pktgen header */
+struct pg_hdr {
+  u_int32_t pg_magic;
+  u_int32_t pg_id;
+  u_int64_t pg_time;
+};
+
+/* packet */
+struct pktgen_pkt {
+  struct pd_hdr pd;
+  struct ether_header eth;
+  struct ip ip;
+  struct udphdr udp;
+  struct pg_hdr pg;
+} __attribute__((packed));
+
+
+
+void set_pdhdr(struct pktgen_pkt *pkt, u_int16_t frame_len)
+{
+  struct pd_hdr *pd;
+  pd = &pkt->pd;
+
+  pd->pd_magic = htons(PKTDEV_MAGIC);
+  pd->pd_frame_len = htons(frame_len);
+
+  return;
+}
+
+void set_ethhdr(struct pktgen_pkt *pkt)
+{
+  struct ether_header *eth;
+  eth = &pkt->eth;
+
+  eth->ether_dhost[5] = (ETH_DST_MAC      ) & 0xFF;
+  eth->ether_dhost[4] = (ETH_DST_MAC >>  8) & 0xFF;
+  eth->ether_dhost[3] = (ETH_DST_MAC >> 16) & 0xFF;
+  eth->ether_dhost[2] = (ETH_DST_MAC >> 24) & 0xFF;
+  eth->ether_dhost[1] = (ETH_DST_MAC >> 32) & 0xFF;
+  eth->ether_dhost[0] = (ETH_DST_MAC >> 40) & 0xFF;
+  eth->ether_shost[5] = (ETH_SRC_MAC      ) & 0xFF;
+  eth->ether_shost[4] = (ETH_SRC_MAC >>  8) & 0xFF;
+  eth->ether_shost[3] = (ETH_SRC_MAC >> 16) & 0xFF;
+  eth->ether_shost[2] = (ETH_SRC_MAC >> 24) & 0xFF;
+  eth->ether_shost[1] = (ETH_SRC_MAC >> 32) & 0xFF;
+  eth->ether_shost[0] = (ETH_SRC_MAC >> 40) & 0xFF;
+  eth->ether_type = htons(ETHERTYPE_IP);
+
+  return;
+}
+
+void set_ip4hdr(struct pktgen_pkt *pkt, u_int16_t frame_len)
+{
+  struct ip *ip;
+  ip = &pkt->ip;
+
+  ip->ip_v = IPVERSION;
+  ip->ip_hl = 5;
+  ip->ip_tos = 0;
+  ip->ip_len = htons(frame_len - ETH_HDR_LEN);
+  ip->ip_id = 0;
+  ip->ip_off = htons (IP_DF);
+  ip->ip_ttl = 0x20;
+  ip->ip_p = IPPROTO_UDP;
+  inet_pton(AF_INET, IP4_SRC_IP, &ip->ip_src);
+  inet_pton(AF_INET, IP4_DST_IP, &ip->ip_dst);
+  ip->ip_sum = 0;
+
+  return;
+}
+
+void set_udphdr(struct pktgen_pkt *pkt, u_int16_t frame_len)
+{
+  struct udphdr *udp;
+  udp = &pkt->udp;
+
+  udp->uh_sport = htons(UDP_SRC_PORT);
+  udp->uh_dport = htons(UDP_DST_PORT);
+  udp->uh_ulen = htons(frame_len - ETH_HDR_LEN - IP4_HDR_LEN);
+  udp->uh_sum = 0;
+
+  return;
+}
+
+void set_pghdr(struct pktgen_pkt *pkt)
+{
+  struct pg_hdr *pg;
+  pg = &pkt->pg;
+
+  pg->pg_magic = htonl(PKTGEN_MAGIC);
+  pg->pg_id = 0;
+  pg->pg_time = 0;
+
+  return;
+};
+
+unsigned short id = 0;
+void build_pkts(u_int8_t *pkts, struct pktgen_pkt *pkt,
+    unsigned int npkt, int len)
+{
+  int i;
+
+  for (i = 0; i < npkt; i++) {
+    pkt->ip.ip_id = htons(id);
+    pkt->pg.pg_id = htons(id++);
+    pkt->ip.ip_sum = wrapsum(checksum(&pkt->ip, sizeof(struct ip), 0));
+    memcpy(pkts + (len * i), pkt, sizeof(struct pktgen_pkt));
+  }
+}
+
+// ./pktgen_stdout -s <frame_len> -n <npkt> -m <nloop>
+// ex(595 * 25010 = 14.88Mpps): ./pktgen_stdout -s 60 -n 595 -m 25010
 int main(int argc, char **argv)
 {
-  u_int8_t *pkt;//, *p;
-  struct packet data;
-  int i, len;
+  u_int8_t *pkts;
+  struct pktgen_pkt *pkt;
+  int i, len, len2;
 
-  unsigned short frame_len = 60;
-  unsigned int npkt = 1;
-  unsigned int nloop = 1;
+  u_int16_t frame_len = 60;
+  unsigned int npkt = 2;
+  unsigned int nloop = 10;
 
-  len = PKTDEV_HDR_LEN + frame_len;
-
-  // npkt
-  if (frame_len >= 60)
-    pkt = calloc((size_t)(len * npkt), sizeof(u_int8_t));
-  else {
-    fprintf(stderr, "frame size error: %d\n", frame_len);
-    return 1;
+  for (i = 1; i < argc; ++i) {
+    if (0 == strcmp(argv[i], "-s")) {
+      if (++i == argc) perror("-s");
+      frame_len = atoi(argv[i]);
+    } else if (0 == strcmp(argv[i], "-n")) {
+      if (++i == argc) perror("-n");
+      npkt = atoi(argv[i]);
+    } else if (0 == strcmp(argv[i], "-m")) {
+      if (++i == argc) perror("-m");
+      nloop = atoi(argv[i]);
+    }
   }
 
-  // fill packet
-  data = fill_packet(data, frame_len);
-  //memcpy(pkt, &data, sizeof(struct packet));
+  if (frame_len < 60 || frame_len > 9014) {
+    fprintf(stderr, "frame size error: %d\n", frame_len);
+    return -1;
+  }
+  if (npkt < 1) {
+    fprintf(stderr, "npkt error: %d\n", (int)npkt);
+    return -1;
+  }
+  if (nloop < 1) {
+    fprintf(stderr, "nloop error: %d\n", nloop);
+    return -1;
+  }
 
-  // pack
-  for (i = 0; i < npkt; i++)
-    memcpy(pkt + (len * i), &data, sizeof(struct packet));
+  pkt = malloc(sizeof(struct pktgen_pkt));
+  set_pdhdr(pkt, frame_len);
+  set_ethhdr(pkt);
+  set_ip4hdr(pkt, frame_len);
+  set_udphdr(pkt, frame_len);
+  set_pghdr(pkt);
+
+  len = PKTDEV_HDR_LEN + frame_len;
+  pkts = calloc((size_t)(len * npkt), sizeof(u_int8_t));
 
   // nloop
-  for (i = 0; i < nloop; i++)
-    write(1, pkt, len * npkt);
+  len2 = len * npkt;
+  for (i = 0; i < nloop; i++) {
+    build_pkts(pkts, pkt, npkt, len);
+    write(1, pkts, len2);
+  }
+
+  if (pkts)
+    free(pkts);
 
   if (pkt)
     free(pkt);
