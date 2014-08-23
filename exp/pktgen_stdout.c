@@ -189,16 +189,18 @@ void set_pghdr(struct pktgen_pkt *pkt)
 };
 
 unsigned short id = 0;
-void build_pkts(u_int8_t *pkts, struct pktgen_pkt *pkt,
-    unsigned int npkt, int len)
+void build_pack(char *pack, struct pktgen_pkt *pkt,
+    unsigned int npkt, int pktlen)
 {
-  int i;
+  int i, offset;
 
+  offset = 0;
   for (i = 0; i < npkt; i++) {
     pkt->ip.ip_id = htons(id);
     pkt->pg.pg_id = htons(id++);
     pkt->ip.ip_sum = wrapsum(checksum(&pkt->ip, sizeof(struct ip), 0));
-    memcpy(pkts + (len * i), pkt, sizeof(struct pktgen_pkt));
+    memcpy(pack + offset, pkt, sizeof(struct pktgen_pkt));
+    offset += pktlen;
   }
 }
 
@@ -206,11 +208,12 @@ void build_pkts(u_int8_t *pkts, struct pktgen_pkt *pkt,
 // ex(595 * 25010 = 14.88Mpps): ./pktgen_stdout -s 60 -n 595 -m 25010
 int main(int argc, char **argv)
 {
-  u_int8_t *pkts;
-  struct pktgen_pkt *pkt;
-  int i, len, len2;
+  char *pack = NULL;
+  const char *ptr = NULL;
+  struct pktgen_pkt *pkt = NULL;
+  int ret = 0, i, pktlen, packlen, cnt, nleft;
 
-  u_int16_t frame_len = 60;
+  unsigned short frame_len = 60;
   unsigned int npkt = 2;
   unsigned int nloop = 10;
 
@@ -229,15 +232,18 @@ int main(int argc, char **argv)
 
   if (frame_len < 60 || frame_len > 9014) {
     fprintf(stderr, "frame size error: %d\n", frame_len);
-    return -1;
+    ret = -1;
+    goto out;
   }
   if (npkt < 1) {
     fprintf(stderr, "npkt error: %d\n", (int)npkt);
-    return -1;
+    ret = -1;
+    goto out;
   }
   if (nloop < 1) {
     fprintf(stderr, "nloop error: %d\n", nloop);
-    return -1;
+    ret = -1;
+    goto out;
   }
 
   pkt = malloc(sizeof(struct pktgen_pkt));
@@ -247,21 +253,31 @@ int main(int argc, char **argv)
   set_udphdr(pkt, frame_len);
   set_pghdr(pkt);
 
-  len = PKTDEV_HDR_LEN + frame_len;
-  pkts = calloc((size_t)(len * npkt), sizeof(u_int8_t));
+  pktlen = PKTDEV_HDR_LEN + frame_len;
+  pack = calloc((size_t)(pktlen * npkt), sizeof(char));
 
   // nloop
-  len2 = len * npkt;
+  packlen = pktlen * npkt;
   for (i = 0; i < nloop; i++) {
-    build_pkts(pkts, pkt, npkt, len);
-    write(1, pkts, len2);
+    nleft = packlen;
+    ptr = (char *)pack;
+    build_pack(pack, pkt, npkt, pktlen);
+    while (nleft > 0) {
+      if ((cnt = write(1, ptr, packlen)) <= 0) {
+        fprintf(stderr, "can't write to file: ret=%d\n", cnt);
+         goto out;
+      }
+      nleft -= cnt;
+      ptr += cnt;
+    }
   }
 
-  if (pkts)
-    free(pkts);
+out:
+  if (pack)
+    free(pack);
 
   if (pkt)
     free(pkt);
 
-  return 0;
+  return ret;
 }
