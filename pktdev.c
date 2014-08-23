@@ -275,6 +275,17 @@ static inline u16 pktdev_pick_tx_queue(int cpu, struct net_device *dev)
 	return (u16) cpu % dev->real_num_tx_queues;
 }
 
+static inline unsigned short pktdev_get_framelen(unsigned char *pkt)
+{
+	// check magic code header
+	if (unlikely(((pkt[0] << 8) | pkt[1]) != PKTDEV_MAGIC)) {
+		pr_info("format error: magic code %X\n", (int)((pkt[0] << 8) | pkt[1]));
+		return 0;
+	}
+
+	return ((pkt[2] << 8) | pkt[3]); // frame_len
+}
+
 /*
  * pktdev_tx_body():
  *
@@ -294,7 +305,7 @@ static void pktdev_tx_body(int cpu)
 {
 	int ret, tmplen, budget;
 	struct sk_buff *tx_skb = NULL;
-	unsigned short magic, frame_len;
+	unsigned short frame_len;
 	struct pktdev_buf ring;
 
 	budget = XMIT_BUDGET;
@@ -308,19 +319,9 @@ tx_loop:
 
 	ring.read_ptr = pdev->txring[cpu].read_ptr;
 
-	// check magic code header
-	magic = *(unsigned short *)&ring.read_ptr[0];
-	if (unlikely(magic != PKTDEV_MAGIC)) {
-		pr_info("[cpu%d] format error: magic code %X, rd %p, wr %p\n",
-		cpu, (int)magic, ring.read_ptr, pdev->txring[cpu].write_ptr);
-		goto err;
-	}
-
-	// check frame_len header
-	frame_len = *(unsigned short *)&ring.read_ptr[2];
+	frame_len = pktdev_get_framelen(pdev->txring[cpu].read_ptr);
 	if (unlikely((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ))) {
-		pr_info("[cpu%d] data size error: %X, rd %p, wr %p\n",
-			cpu, (int)frame_len, ring.read_ptr, pdev->txring[cpu].write_ptr);
+		pr_info("data size error: %X\n", (int)frame_len);
 		goto err;
 	}
 
@@ -381,7 +382,7 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 {
 	//int has_fragment_data = 0;
 	unsigned int len, tmplen; //, fragment_len;
-	unsigned short magic, frame_len;
+	unsigned short frame_len;
 	//static unsigned char fragment[MAX_PKT_SZ];
 
 	func_enter();
@@ -412,22 +413,13 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 		unsigned int ring_no;
 		unsigned char *dbug_rd, *dbug_wr;
 
-		// check magic code header
-		magic = *(unsigned short *)&pdev->txbuf.read_ptr[0];
-		if (unlikely(magic != PKTDEV_MAGIC)) {
-			pr_info("[wr] data format error: magic code: %X\n", (int)magic);
-			return -EFAULT;
-		}
-
-		// check frame_len header
-		frame_len = *(unsigned short *)&pdev->txbuf.read_ptr[2];
+		frame_len = pktdev_get_framelen(pdev->txbuf.read_ptr);
 		if (unlikely((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ))) {
-			pr_info("[wr] data size error: %X\n", (int)frame_len);
+			pr_info("data size error: %X\n", (int)frame_len);
 			return -EFAULT;
 		}
 
 		len = PKTDEV_HDR_SZ + frame_len;
-
 #if 0
 		// copy fragment data to tmp buf
 		fragment_len = count - (pdev->txbuf.read_ptr - pdev->txbuf.start_ptr);
