@@ -168,10 +168,10 @@ void set_udphdr(struct pktgen_pkt *pkt, u_int16_t frame_len)
   struct udphdr *udp;
   udp = &pkt->udp;
 
-  udp->uh_sport = htons(UDP_SRC_PORT);
-  udp->uh_dport = htons(UDP_DST_PORT);
-  udp->uh_ulen = htons(frame_len - ETH_HDR_LEN - IP4_HDR_LEN);
-  udp->uh_sum = 0;
+  udp->source = htons(UDP_SRC_PORT);
+  udp->dest = htons(UDP_DST_PORT);
+  udp->len = htons(frame_len - ETH_HDR_LEN - IP4_HDR_LEN);
+  udp->check = 0;
 
   return;
 }
@@ -214,7 +214,7 @@ int main(int argc, char **argv)
   int ret = 0, i, pktlen, packlen, cnt, nleft;
 
   unsigned short frame_len = 60;
-  unsigned int npkt = 2;
+  unsigned int npkt = 5;
   unsigned int nloop = 10;
 
   for (i = 1; i < argc; ++i) {
