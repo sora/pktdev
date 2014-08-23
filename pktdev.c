@@ -100,7 +100,7 @@ static int pktdev_release(struct inode *inode, struct file *filp);
 static unsigned int pktdev_poll( struct file* filp, poll_table* wait );
 static long pktdev_ioctl(struct file *filp,
 				unsigned int cmd, unsigned long arg);
-static int pktdev_get_ring_free_space(struct pktdev_buf);
+static int pktdev_get_ring_free_space(const struct pktdev_buf *ring);
 static void pktdev_free(void);
 
 
@@ -177,21 +177,21 @@ static int pktdev_open(struct inode *inode, struct file *filp)
 		pr_info("entering %s\n", __func__);
 		pr_info("[op] block: max: %d, start: %p, end: %p, txring_free %d, txring_rd: %p, txring_wr: %p\n",
 			(int)PKT_BUF_SZ, pdev->txring[0].start_ptr, pdev->txring[0].end_ptr,
-			pktdev_get_ring_free_space(pdev->txring[0]),
+			pktdev_get_ring_free_space(&pdev->txring[0]),
 			pdev->txring[0].read_ptr, pdev->txring[0].write_ptr);
 	}
 
 	return 0;
 }
 
-static inline int pktdev_get_ring_free_space(struct pktdev_buf ring)
+static inline int pktdev_get_ring_free_space(const struct pktdev_buf *ring)
 {
 	unsigned int space;
 
-	if (ring.read_ptr > ring.write_ptr)
-		space = ring.read_ptr - ring.write_ptr;
+	if (ring->read_ptr > ring->write_ptr)
+		space = ring->read_ptr - ring->write_ptr;
 	else
-		space = pdev->txring_size - (ring.write_ptr - ring.read_ptr);
+		space = pdev->txring_size - (ring->write_ptr - ring->read_ptr);
 
 	return space;
 }
@@ -224,7 +224,6 @@ static ssize_t pktdev_read(struct file *filp, char __user *buf,
 	return copy_len;
 }
 
-/* from af_packet.c */
 static int pktdev_direct_xmit(struct sk_buff *skb, int cpu)
 {
 	struct net_device *dev = skb->dev;
@@ -306,28 +305,27 @@ static void pktdev_tx_body(int cpu)
 	int ret, tmplen, budget;
 	struct sk_buff *tx_skb = NULL;
 	unsigned short frame_len;
-	struct pktdev_buf ring;
+	unsigned char *tp = NULL; // tmp pointer
+	const struct pktdev_buf *ring = &pdev->txring[cpu];
 
 	budget = XMIT_BUDGET;
-	ring = pdev->txring[cpu];
 
 tx_loop:
 
-	if ((pdev->txring[cpu].read_ptr == pdev->txring[cpu].write_ptr)
-		|| (--budget < 0))
+	if ((ring->read_ptr == ring->write_ptr) || (--budget < 0))
 		goto tx_end;
 
-	ring.read_ptr = pdev->txring[cpu].read_ptr;
+	tp = ring->read_ptr;
 
-	frame_len = pktdev_get_framelen(pdev->txring[cpu].read_ptr);
+	frame_len = pktdev_get_framelen(tp);
 	if (unlikely((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ))) {
 		pr_info("data size error: %X\n", (int)frame_len);
 		goto err;
 	}
 
-	ring.read_ptr += PKTDEV_HDR_SZ;
-	if (ring.read_ptr > ring.end_ptr)
-		ring.read_ptr -= (ring.end_ptr - ring.start_ptr);
+	tp += PKTDEV_HDR_SZ;
+	if (tp > ring->end_ptr)
+		tp -= (ring->end_ptr - ring->start_ptr);
 
 	// alloc skb
 	tx_skb = netdev_alloc_skb(pdev->device, frame_len);
@@ -337,12 +335,12 @@ tx_loop:
 
 		// fill packet
 		skb_put(tx_skb, frame_len);
-		if ((ring.read_ptr + frame_len) > ring.end_ptr) {
-			tmplen = ring.end_ptr - ring.read_ptr;
-			memcpy(tx_skb->data, ring.read_ptr, tmplen);
-			memcpy(tx_skb->data + tmplen, ring.start_ptr, (frame_len - tmplen));
+		if ((tp + frame_len) > ring->end_ptr) {
+			tmplen = ring->end_ptr - tp;
+			memcpy(tx_skb->data, tp, tmplen);
+			memcpy(tx_skb->data + tmplen, ring->start_ptr, (frame_len - tmplen));
 		} else {
-			memcpy(tx_skb->data, ring.read_ptr, frame_len);
+			memcpy(tx_skb->data, tp, frame_len);
 		}
 
 		// sending
@@ -354,12 +352,12 @@ tx_loop:
 			}
 		}
 
-		ring.read_ptr += frame_len;
-		if (ring.read_ptr > ring.end_ptr)
-			ring.read_ptr -= (ring.end_ptr - ring.start_ptr);
+		tp += frame_len;
+		if (tp > ring->end_ptr)
+			tp -= (ring->end_ptr - ring->start_ptr);
 
 		pdev->txring[cpu].read_ptr =
-			(unsigned char *)((uintptr_t)ring.read_ptr & 0xfffffffffffffffc);
+			(unsigned char *)((uintptr_t)tp & 0xfffffffffffffffc);
 	}
 
 tx_fail:
@@ -381,9 +379,11 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 			    size_t count, loff_t *ppos)
 {
 	//int has_fragment_data = 0;
-	unsigned int len, tmplen; //, fragment_len;
+	unsigned int len, tmplen, ring_no; //, fragment_len;
 	unsigned short frame_len;
-	//static unsigned char fragment[MAX_PKT_SZ];
+//static unsigned char fragment[MAX_PKT_SZ];
+	unsigned char *tp = NULL; // tmp pointer
+	const struct pktdev_buf *ring = NULL;
 
 	func_enter();
 
@@ -409,10 +409,6 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 	}
 
 	while (likely(count != (pdev->txbuf.read_ptr - pdev->txbuf.start_ptr))) {
-		struct pktdev_buf ring;
-		unsigned int ring_no;
-		unsigned char *dbug_rd, *dbug_wr;
-
 		frame_len = pktdev_get_framelen(pdev->txbuf.read_ptr);
 		if (unlikely((frame_len > MAX_PKT_SZ) || (frame_len < MIN_PKT_SZ))) {
 			pr_info("data size error: %X\n", (int)frame_len);
@@ -432,32 +428,30 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 
 		// txqueue selecter
 		ring_no = pktdev_get_hash(pdev->txbuf.start_ptr); //pdev->num_cpus;
-		ring = pdev->txring[ring_no];
-		//pr_info("Break: cpu=%d, rd=%p, wr=%p\n", ring_no,
-				//ring.read_ptr, ring.write_ptr);
+
+		ring = &pdev->txring[ring_no];
+		tp = ring->write_ptr;
 
 		// txbuf to txring
 		if (likely(pktdev_get_ring_free_space(ring) > RING_THRESHOLD)) {
 			// when overwriting
-			if (unlikely((ring.write_ptr + len) > ring.end_ptr)) {
-				tmplen = ring.end_ptr - ring.write_ptr;
-				memcpy(ring.write_ptr, pdev->txbuf.read_ptr, tmplen);
-				memcpy(ring.start_ptr, (pdev->txbuf.read_ptr + tmplen), (len - tmplen));
-				ring.write_ptr = ring.start_ptr + (len - tmplen);
+			if (unlikely((tp + len) > ring->end_ptr)) {
+				tmplen = ring->end_ptr - tp;
+				memcpy(tp, pdev->txbuf.read_ptr, tmplen);
+				memcpy(ring->start_ptr, (pdev->txbuf.read_ptr + tmplen),
+					(len - tmplen));
+				tp = ring->start_ptr + (len - tmplen);
 			} else {
-				memcpy(ring.write_ptr, pdev->txbuf.read_ptr, len);
-				ring.write_ptr += len;
+				memcpy(tp, pdev->txbuf.read_ptr, len);
+				tp += len;
 			}
 			pdev->txbuf.read_ptr += len;
 
 			// update ring write pointer with memory alignment
 			pdev->txring[ring_no].write_ptr =
-				(unsigned char *)((uintptr_t)ring.write_ptr & 0xfffffffffffffffc);
+				(unsigned char *)((uintptr_t)tp & 0xfffffffffffffffc);
 		} else {
 			// return when a ring buffer reached the max size
-			dbug_rd = ring.read_ptr;
-			dbug_wr = ring.write_ptr;
-			pr_info("Break: cpu=%d, rd=%p, wr=%p\n", ring_no, dbug_rd, dbug_wr);
 			break;
 		}
 	}
@@ -478,7 +472,7 @@ static int pktdev_release(struct inode *inode, struct file *filp)
 		pr_info("entering %s\n", __func__);
 		pr_info("[cl] block: max: %d, start: %p, end: %p, txring_free %d, txring_rd: %p, txring_wr: %p\n",
 				(int)PKT_BUF_SZ, pdev->txring[0].start_ptr, pdev->txring[0].end_ptr,
-				pktdev_get_ring_free_space(pdev->txring[0]),
+				pktdev_get_ring_free_space(&pdev->txring[0]),
 				pdev->txring[0].read_ptr, pdev->txring[0].write_ptr);
 	}
 
