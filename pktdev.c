@@ -357,7 +357,7 @@ tx_loop:
 			tp -= (ring->end_ptr - ring->start_ptr);
 
 		pdev->txring[cpu].read_ptr =
-			(unsigned char *)((uintptr_t)tp & 0xfffffffffffffffc);
+			(unsigned char *)(((uintptr_t)tp + 3) & 0xfffffffffffffffc);
 	}
 
 tx_fail:
@@ -449,7 +449,7 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 
 			// update ring write pointer with memory alignment
 			pdev->txring[ring_no].write_ptr =
-				(unsigned char *)((uintptr_t)tp & 0xfffffffffffffffc);
+				(unsigned char *)(((uintptr_t)tp + 3) & 0xfffffffffffffffc);
 		} else {
 			// return when a ring buffer reached the max size
 			break;
