@@ -231,7 +231,6 @@ static int pktdev_direct_xmit(struct sk_buff *skb, int cpu)
 	netdev_features_t features;
 	struct netdev_queue *txq;
 	int ret = NETDEV_TX_BUSY;
-	u16 queue_map;
 
 	if (unlikely(!netif_running(dev) || !netif_carrier_ok(dev))) {
 		goto drop;
@@ -242,8 +241,7 @@ static int pktdev_direct_xmit(struct sk_buff *skb, int cpu)
 		goto drop;
 	}
 
-	queue_map = skb_get_queue_mapping(skb);
-	txq = netdev_get_tx_queue(dev, queue_map);
+	txq = skb_get_tx_queue(dev, skb);
 
 	local_bh_disable();
 
@@ -450,10 +448,13 @@ static ssize_t pktdev_write(struct file *filp, const char __user *buf,
 			// update ring write pointer with memory alignment
 			pdev->txring[ring_no].write_ptr =
 				(unsigned char *)(((uintptr_t)tp + 3) & 0xfffffffffffffffc);
-		} else {
+		}
+#if 0
+		else {
 			// return when a ring buffer reached the max size
 			break;
 		}
+#endif
 	}
 
 //copy_end:
