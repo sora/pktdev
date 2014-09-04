@@ -227,7 +227,6 @@ static ssize_t pktdev_read(struct file *filp, char __user *buf,
 static int pktdev_direct_xmit(struct sk_buff *skb, int cpu)
 {
 	struct net_device *dev = skb->dev;
-	const struct net_device_ops *ops = dev->netdev_ops;
 	netdev_features_t features;
 	struct netdev_queue *txq;
 	int ret = NETDEV_TX_BUSY;
@@ -246,13 +245,8 @@ static int pktdev_direct_xmit(struct sk_buff *skb, int cpu)
 	local_bh_disable();
 
 	HARD_TX_LOCK(dev, txq, cpu);
-
-	if (!netif_xmit_frozen_or_drv_stopped(txq)) {
-		ret = ops->ndo_start_xmit(skb, dev);
-		if (ret == NETDEV_TX_OK)
-			txq_trans_update(txq);
-	}
-
+	if (!netif_xmit_frozen_or_drv_stopped(txq))
+		ret = netdev_start_xmit(skb, dev, txq, false);
 	HARD_TX_UNLOCK(dev, txq);
 
 	local_bh_enable();
