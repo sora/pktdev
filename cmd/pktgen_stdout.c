@@ -9,6 +9,7 @@
 #include <net/ethernet.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#define __FAVOR_BSD
 #include <netinet/udp.h>
 
 
@@ -146,10 +147,10 @@ void set_udphdr(struct pktgen_pkt *pkt, u_int16_t frame_len)
   struct udphdr *udp;
   udp = &pkt->udp;
 
-  udp->source = htons(UDP_SRC_PORT);
-  udp->dest = htons(UDP_DST_PORT);
-  udp->len = htons(frame_len - ETH_HDR_LEN - IP4_HDR_LEN);
-  udp->check = 0;
+  udp->uh_sport = htons(UDP_SRC_PORT);
+  udp->uh_dport = htons(UDP_DST_PORT);
+  udp->uh_ulen = htons(frame_len - ETH_HDR_LEN - IP4_HDR_LEN);
+  udp->uh_sum = 0;
 
   return;
 }
