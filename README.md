@@ -45,13 +45,13 @@ txring_size | Tx buffer size for each CPU cores
 
 ```bash
 # one-way bridging (todo)
-$ dd -i /dev/pkt/p2p1 -o /dev/pkt/p2p2
+$ dd if=/dev/pkt/p2p1 of=/dev/pkt/p2p2
 
 # capture (todo)
-$ dd -i /dev/pkt/p2p1 -o recv.pkt
+$ dd if=/dev/pkt/p2p1 of=recv.pkt
 
 # traffic replay (todo)
-$ dd -i ./recv.pkt -o /dev/pkt/p2p1
+$ dd if=./recv.pkt of=/dev/pkt/p2p1
 
 # pktgen (64byte, 14880950 pkts)
 $ cmd/pktgen_stdout -s 60 -n 41 -m 36295 > /dev/pkt/p2p1
