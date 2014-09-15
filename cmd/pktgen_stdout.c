@@ -244,7 +244,8 @@ int main(int argc, char **argv)
     while (nleft > 0) {
       if ((cnt = write(1, ptr, packlen)) <= 0) {
         fprintf(stderr, "can't write to file: ret=%d\n", cnt);
-         goto out;
+        fprintf(stderr, "nloop: %d, nleft: %d\n", nloop, nleft);
+        goto out;
       }
       nleft -= cnt;
       ptr += cnt;
