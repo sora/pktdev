@@ -9,7 +9,7 @@ Packet processing applications is developed combining with 1. OS commands(`dd`, 
 
 #### Features
 
-* Support Linux 3.15 and newer kernel
+* Support Linux 3.16 and newer kernel
 * Running on vanilla kernel and NIC driver
 * Multiple core packet sending
 * TX performance (2014/8, Intel Core i7 3770 + Intel 82599 NIC)
