@@ -53,7 +53,7 @@ $ dd -i /dev/pkt/p2p1 -o recv.pkt
 # traffic replay (todo)
 $ dd -i ./recv.pkt -o /dev/pkt/p2p1
 
-# pktgen (64byte, 14.88Mpps)
+# pktgen (64byte, 14880950 pkts)
 $ cmd/pktgen_stdout -s 60 -n 41 -m 36295 > /dev/pkt/p2p1
 
 # mirroring (todo)
