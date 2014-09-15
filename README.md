@@ -29,8 +29,8 @@ $ cd pktdev
 $ make
 $ sudo insmod ./pktdev.ko interface="p2p1" tx_cpus="4" txring_size="32"
 $ sudo chmod 777 /dev/pkt/p2p1
-$ (cd exp; make)
-$ exp/pktgen_stdout -s 60 -n 10 -m 10 > /dev/pkt/p2p1
+$ (cd cmd; make)
+$ cmd/pktgen_stdout -s 60 -n 10 -m 10 > /dev/pkt/p2p1
 ```
 
 #### Parameters
