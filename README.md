@@ -1,6 +1,9 @@
 pktdev: Packet Character Device
 ===============================
 
+#### Development platform
+
+Linux ([David Miller's -next networking tree](https://kernel.googlesource.com/pub/scm/linux/kernel/git/davem/net-next/))
 
 #### How to use
 ```bash
@@ -18,13 +21,13 @@ $ exp/pktgen_stdout -s 60 -n 10 -m 10 > /dev/pkt/p2p1
 ````bash
 0                      16 (bit)
 +-----------------------+
-|  Magic code (0x3776)  |
+|  Magic code (0x3776)  |
 +-----------------------+
-|      Frame length     |
+|      Frame length     |
 +-----------------------+
-|                       |
-|      Packet data      |
-|                       |
+|                       |
+|      Packet data      |
+|                       |
 +-----------------------+
 ````
 
