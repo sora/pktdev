@@ -1,19 +1,12 @@
-ifneq ($(KERNELRELEASE),)
-obj-m		:= pktdev.o
-else
 KDIR		:= /lib/modules/$(shell uname -r)/build/
 PWD		:= $(shell pwd)
+VERBOSE = 0
+
+obj-m := pktdev.o
 
 all:
-	$(MAKE) -C $(KDIR) SUBDIRS=$(PWD) V=1 modules
+	$(MAKE) -C $(KDIR) M=$(PWD) V=$(VERBOSE) modules
 
 clean:
-	$(MAKE) -C $(KDIR) SUBDIRS=$(PWD) clean
+	$(MAKE) -C $(KDIR) M=$(PWD) clean
 
-install:
-	install -m 644 $(PWD)/*.ko /lib/modules/`uname -r`/kernel/drivers/misc
-	if [ -d /etc/udev/rules.d -a ! -f /etc/udev/rules.d/99-genpipe.rules ] ; then \
-		install -m 644 99-genpipe.rules /etc/udev/rules.d ; \
-	fi
-	depmod -a
-endif
