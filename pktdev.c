@@ -1,5 +1,3 @@
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
 #include <linux/semaphore.h>
 #include <linux/etherdevice.h>
 #include <linux/module.h>
@@ -43,6 +41,9 @@
 
 #define MAX_CPUS           (31)
 #define XMIT_BUDGET        (0xFF)
+
+#undef pr_fmt
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #define func_enter() pr_debug("entering %s\n", __func__);
 
